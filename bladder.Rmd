@@ -8,10 +8,12 @@ output:
 
 First install BiocManager, edgeR, and TCGAbiolinks (uncomment code below to do this)
 ```{r}
-install.packages("BiocManager")
-BiocManager::install("edgeR")
-BiocManager::install("TCGAbiolinks")
-BiocManager::install("genefilter")
+# if (!require("BiocManager", quietly = TRUE))
+#    install.packages("BiocManager")
+# 
+# BiocManager::install("edgeR")
+# BiocManager::install("TCGAbiolinks")
+# BiocManager::install("genefilter")
 ```
 
 <br>\
