@@ -1,0 +1,222 @@
+---
+title: "Bladder cohort - R Notebook"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+---
+
+First install BiocManager, edgeR, and TCGAbiolinks (uncomment code below to do this)
+```{r}
+install.packages("BiocManager")
+BiocManager::install("edgeR")
+BiocManager::install("TCGAbiolinks")
+BiocManager::install("genefilter")
+```
+
+<br>\
+<br>\
+Step 1 - Load packages, download data from TCGA, and prepare it for DEGList
+```{r}
+library("TCGAbiolinks")
+library("limma")
+library("edgeR")
+library("glmnet")
+library("factoextra")
+library("FactoMineR")
+library("caret")
+library("SummarizedExperiment")
+library("gplots")
+library("survival")
+library("survminer")
+library("RColorBrewer")
+library("gProfileR")
+library("genefilter")
+
+setwd('C:/Adam/R/')  # make sure it already exists
+
+query_TCGA = GDCquery(
+  project = "TCGA-BLCA",
+  data.category = "Transcriptome Profiling", # parameter enforced by GDCquery
+  data.type="Gene Expression Quantification",
+  experimental.strategy = "RNA-Seq",
+  workflow.type = "STAR - Counts",
+  sample.type = c("Primary Tumor", "Solid Tissue Normal"))
+
+lihc_res = getResults(query_TCGA) # make results as table
+
+GDCdownload(query = query_TCGA)
+tcga_data = GDCprepare(query_TCGA)
+
+```
+
+<br>\
+<br>\
+Step 2 - Generate DEGList, filter low counts, and normalize data
+```{r}
+limma_pipeline = function(
+  tcga_data,
+  condition_variable,
+  reference_group=NULL){
+
+  design_factor = colData(tcga_data)[, condition_variable, drop=T]
+
+  group = factor(design_factor)
+  if(!is.null(reference_group)){group = relevel(group, ref=reference_group)}
+
+  design = model.matrix(~ group)
+
+  dge = DGEList(counts=assay(tcga_data),
+                 samples=colData(tcga_data),
+                 genes=as.data.frame(rowData(tcga_data)))
+
+  # filtering
+  keep = filterByExpr(dge,design)
+  dge = dge[keep,,keep.lib.sizes=FALSE]
+  rm(keep)
+
+  # Normalization (TMM followed by voom)
+  dge = calcNormFactors(dge)
+  v = voom(dge, design, plot=TRUE)
+
+  # Fit model to data given design
+  fit = lmFit(v, design)
+  fit = eBayes(fit)
+
+  # Show top genes
+  topGenes = topTable(fit, coef=ncol(design), number=100, sort.by="p")
+
+  return(
+    list(
+      voomObj=v, # normalized data
+      fit=fit, # fitted model and statistics
+      topGenes=topGenes # the 100 most differentially expressed genes
+    )
+  )
+}
+
+limma_res = limma_pipeline(
+  tcga_data=tcga_data,
+  condition_variable="definition",
+  reference_group="Solid Tissue Normal"
+)
+```
+
+<br>\
+<br>\
+Step 3 - Visualize
+```{r}
+plot_PCA = function(voomObj, condition_variable){
+  group = factor(voomObj$targets[, condition_variable])
+  pca = prcomp(t(voomObj$E))
+  # Take PC1 and PC2 for the plot
+  plot(pca$x[,1:2],col=group, pch=19)
+  # include a legend for points
+  legend("bottomleft", inset=.01, levels(group), pch=19, col=1:length(levels(group)))
+  return(pca)
+}
+res_pca = plot_PCA(limma_res$voomObj, "definition")
+```
+
+<br>\
+<br>\
+Step 4 - Classification model training, testing, and evaluation
+```{r}
+# Transpose and make it into a matrix object
+d_mat = as.matrix(t(limma_res$voomObj$E))
+
+# As before, we want this to be a factor
+d_resp = as.factor(limma_res$voomObj$targets$definition)
+
+# Divide data into training and testing set
+
+# Set (random-number-generator) seed so that results are consistent between runs
+set.seed(42)
+train_ids = createDataPartition(d_resp, p=0.75, list=FALSE)
+
+x_train = d_mat[train_ids, ]
+x_test  = d_mat[-train_ids, ]
+
+y_train = d_resp[train_ids]
+y_test  = d_resp[-train_ids]
+
+# Train model on training dataset using cross-validation
+res = cv.glmnet(
+  x = x_train,
+  y = y_train,
+  alpha = 0.5,
+  family = "binomial")
+
+# Test/Make prediction on test dataset
+y_pred = predict(res, newx=x_test, type="class", s="lambda.min")
+
+confusion_matrix = table(y_pred, y_test)
+
+# Evaluation statistics
+print(confusion_matrix)
+print(paste0("Sensitivity: ",sensitivity(confusion_matrix)))
+print(paste0("Specificity: ",specificity(confusion_matrix)))
+print(paste0("Precision: ",precision(confusion_matrix)))
+
+# Getting genes that contribute for the prediction
+res_coef = coef(res, s="lambda.min") # the "coef" function returns a sparse matrix
+
+# get coefficients with non-zero values
+res_coef = res_coef[res_coef[,1] != 0,]
+dim(res_coef)
+head(res_coef)
+
+# remove first coefficient as this is the intercept, a variable of the model itself
+res_coef = res_coef[-1]
+
+relevant_genes = names(res_coef) # get names of the (non-zero) variables.
+length(relevant_genes) # number of selected genes
+
+head(relevant_genes) # few select genes
+head(limma_res$voomObj$genes)
+relevant_gene_names = limma_res$voomObj$genes[relevant_genes,"external_gene_name"]
+
+head(relevant_gene_names) # few select genes (with readable names now)
+
+print(intersect(limma_res$topGenes$ensembl_gene_id, relevant_genes))
+```
+
+<br>\
+<br>\
+Step 5 - Hierarchical clustering
+```{r}
+ # define the color palette for the plot
+hmcol = colorRampPalette(rev(brewer.pal(9, "RdBu")))(256)
+
+# perform complete linkage clustering
+clust = function(x) hclust(x, method="complete")
+# use the inverse of correlation as distance.
+dist = function(x) as.dist((1-cor(t(x)))/2)
+
+# Show green color for genes that also show up in DE analysis
+colorLimmaGenes = ifelse(
+  # Given a vector of boolean values
+  (relevant_genes %in% limma_res$topGenes$ensembl_gene_id),
+  "green", # if true, return green for that value
+  "white" # if false, return white for that value
+)
+
+# As you've seen a good looking heatmap involves a lot of parameters
+gene_heatmap = heatmap.2(
+  t(d_mat[,relevant_genes]),
+  scale="row",          # scale the values for each gene (row)
+  density.info="none",  # turns off density plot inside color legend
+  trace="none",         # turns off trace lines inside the heat map
+  col=hmcol,            # define the color map
+  labRow=relevant_gene_names, # use gene names instead of ensembl annotation
+  RowSideColors=colorLimmaGenes,
+  labCol=FALSE,         # Not showing column labels
+  ColSideColors=as.character(as.numeric(d_resp)), # Show colors for each response class
+  dendrogram="both",    # Show dendrograms for both axis
+  hclust = clust,       # Define hierarchical clustering method
+  distfun = dist,       # Using correlation coefficient for distance function
+  cexRow=.6,            # Resize row labels
+  margins=c(1,5)        # Define margin spaces
+)
+
+```
