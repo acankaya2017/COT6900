@@ -5,15 +5,19 @@ output:
   html_document:
     df_print: paged
 ---
+Adam Cankaya
+acankaya2017@fau.edu
+Based on tutorial found at https://www.costalab.org/wp-content/uploads/2020/11/R_class_D3.htm
 
-First install BiocManager, edgeR, and TCGAbiolinks (uncomment code below to do this)
+
+First install BiocManager, edgeR, and TCGAbiolinks
 ```{r}
-# if (!require("BiocManager", quietly = TRUE))
-#    install.packages("BiocManager")
-# 
-# BiocManager::install("edgeR")
-# BiocManager::install("TCGAbiolinks")
-# BiocManager::install("genefilter")
+if (!require("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+
+BiocManager::install("edgeR")
+BiocManager::install("TCGAbiolinks")
+BiocManager::install("genefilter")
 ```
 
 <br>\
@@ -37,18 +41,55 @@ library("genefilter")
 
 setwd('C:/Adam/R/')  # make sure it already exists
 
+# Before we perform a GDC query let's look at the TCGA-BLCA data
+# As of June 2024 we should see a case count of 412
+TCGAbiolinks:::getProjectSummary("TCGA-BLCA")
+
+# Download TCGA-BLCA data from GDC
+# We want the complete RNA sequencing and raw gene count data 
+# So we run a query of the Transcriptome Profiling category and RNA-Seq experimental type
+# We use the STAR - Counts workflow type because it contains the raw gene counts we need
+# We ignore other sample types besides tumor and normal
+# The original paper by Wang uses the HTSeq-counts workflow, but this is a legacy version of
+#  the new STAR - COUNTS workflow type
 query_TCGA = GDCquery(
   project = "TCGA-BLCA",
-  data.category = "Transcriptome Profiling", # parameter enforced by GDCquery
+  data.category = "Transcriptome Profiling",
   data.type="Gene Expression Quantification",
   experimental.strategy = "RNA-Seq",
   workflow.type = "STAR - Counts",
   sample.type = c("Primary Tumor", "Solid Tissue Normal"))
 
-lihc_res = getResults(query_TCGA) # make results as table
+# Run the query and format it as a table
+# The results are a table with 431 rows (because some patients have multiple cases each)
+# There are 29 columns with meta data about each case such as sample_type (tumor vs normal)
+lihc_res = getResults(query_TCGA)
 
+# We can create a summary table shows there are 412 tumor and 19 normal (412+19=431)
+summary(factor(lihc_res$sample_type))
+
+# Go ahead and download all the data from GDC to our working directory
 GDCdownload(query = query_TCGA)
+
+# Now load the RNA-Seq data from the files into R workspace
 tcga_data = GDCprepare(query_TCGA)
+
+# This data object has 60660 rows and 431 columns
+# This indicates there are 60660 different genes found throughout all the cases
+# The object contains both clincal and expression data
+dim(tcga_data)
+
+# We can access the data in the object like this which verifies 412 tumor and 19 normal
+table(tcga_data@colData$definition)
+
+# Or see the gender data of 117 female and 314 male
+table(tcga_data@colData$gender)
+
+# To preview the raw gene counts let's look at the expression levels of the first 6 genes in the first 10 samples...
+head(assay(tcga_data)[,1:10])
+
+# And let's look at the various names of the first 6 genes...
+head(rowData(tcga_data))
 
 ```
 
@@ -56,37 +97,64 @@ tcga_data = GDCprepare(query_TCGA)
 <br>\
 Step 2 - Generate DEGList, filter low counts, and normalize data
 ```{r}
+# Before we can perform DEG analysis we need to normalize the data
+# Let's create a limma pipeline to do this...
+# The pipeline function will take in three input parameters:
+#   tcga_data - the data object we created in Step 1
+#   condition_variable - the variable by which we will group patients (tumor vs normal)
+#   reference_group - indicates which of the condition variable values is the reference group (no tumors)
+# The pipeline will return a list of three objects:
+#   voom - the TMM normalized data returned by running voom
+#   eBayes - the fitted model returned by running eBayes
+#   topTable - a simple table which contains the top 100 differentially expressed genes sorted by p.value
 limma_pipeline = function(
   tcga_data,
   condition_variable,
   reference_group=NULL){
 
-  design_factor = colData(tcga_data)[, condition_variable, drop=T]
+  # Create a design matrix
+  # The factor is the category classifier for the data (tumor vs normal)
+  #  limma requires it to be a factor object
+  design_factor = colData(tcga_data)[, condition_variable, drop=T] # definition
+  group = factor(design_factor) # Solid Normal Tissue
+  
+  if (!is.null(reference_group)) {
+    group = relevel(group, ref=reference_group) # otherwise just pick the first class as the reference class
+  }
 
-  group = factor(design_factor)
-  if(!is.null(reference_group)){group = relevel(group, ref=reference_group)}
-
+  # make the design matrix
   design = model.matrix(~ group)
 
+  # generate the DGEList object using the input...
+  #  counts is the raw gene counts (numericla matrix - rows as genes, columns as cases)
+  #  samples is the clinical data (data frame)
+  #  genes is the annotation information (data frame - gene id and names)
+  # the DGEList object returned is a transformed version of tcga_data
   dge = DGEList(counts=assay(tcga_data),
                  samples=colData(tcga_data),
                  genes=as.data.frame(rowData(tcga_data)))
 
-  # filtering
-  keep = filterByExpr(dge,design)
-  dge = dge[keep,,keep.lib.sizes=FALSE]
-  rm(keep)
+  # filtering - by default genes with less than 10 reads are removed
+  keep = filterByExpr(dge,design) # genes which meet are left after filtering
+  dge = dge[keep,,keep.lib.sizes=FALSE] # filter the DGEList object and only keep the genes we want
+  rm(keep) # remove this object from memory because we are done with it
 
   # Normalization (TMM followed by voom)
+  # normalizing - minimize batch effects and variation with the TMM normalization
+  # TMM - trimmed mean of M-values
+  # use the voom method to conver the data to have a similar variance as arrays - as required by limma
   dge = calcNormFactors(dge)
   v = voom(dge, design, plot=TRUE)
 
   # Fit model to data given design
+  #  fits a series of linear models, one to each probe
+  #  then pass it to eBayes to rank the differential expression
   fit = lmFit(v, design)
   fit = eBayes(fit)
 
   # Show top genes
   topGenes = topTable(fit, coef=ncol(design), number=100, sort.by="p")
+  print(topGenes)
 
   return(
     list(
@@ -97,6 +165,16 @@ limma_pipeline = function(
   )
 }
 
+# TODO only run the pipeline if we didn't already run it before and save the data to a local file
+#  tcga_data = readRDS(file = "tcga_data.RDS")
+#  saveRDS(object = tcga_data,
+#    file = "tcga_data.RDS",
+#    compress = FALSE)
+
+# Run the pipeline on the tcga_data from step 1 and normal tissue as the reference
+#  "definition" is the column name for the tissue type (tumor vs normal)
+#  "Solid Tissue Normal" is our baseline/control/reference class value
+# The limma_res object returned is a list of 3 objects - voomObj, fit, topGenes
 limma_res = limma_pipeline(
   tcga_data=tcga_data,
   condition_variable="definition",
@@ -108,8 +186,11 @@ limma_res = limma_pipeline(
 <br>\
 Step 3 - Visualize
 ```{r}
+# make a function to generate a scatter plot to show a separation of tumor vs normal classification points
 plot_PCA = function(voomObj, condition_variable){
+  # create a factor
   group = factor(voomObj$targets[, condition_variable])
+  # perform a principal component analysis 
   pca = prcomp(t(voomObj$E))
   # Take PC1 and PC2 for the plot
   plot(pca$x[,1:2],col=group, pch=19)
@@ -117,6 +198,8 @@ plot_PCA = function(voomObj, condition_variable){
   legend("bottomleft", inset=.01, levels(group), pch=19, col=1:length(levels(group)))
   return(pca)
 }
+
+# call the plot function with the voom object and the defintion column
 res_pca = plot_PCA(limma_res$voomObj, "definition")
 ```
 
@@ -124,25 +207,40 @@ res_pca = plot_PCA(limma_res$voomObj, "definition")
 <br>\
 Step 4 - Classification model training, testing, and evaluation
 ```{r}
+# TODO need to redo this whole step using WGCNA
+
+# use the expression data that has been normalized
 # Transpose and make it into a matrix object
 d_mat = as.matrix(t(limma_res$voomObj$E))
 
-# As before, we want this to be a factor
+# and the clinical feature to distinguish cases ("definition")
+# Make it a factor
 d_resp = as.factor(limma_res$voomObj$targets$definition)
 
 # Divide data into training and testing set
+# 75% of samples for training and 25% for testing
 
 # Set (random-number-generator) seed so that results are consistent between runs
 set.seed(42)
+
+# create a vector of booleans to subset the cases
 train_ids = createDataPartition(d_resp, p=0.75, list=FALSE)
 
+# x is the matrix with normalized expression data
+# y is the vector with the response variable (tumor vs normal)
 x_train = d_mat[train_ids, ]
 x_test  = d_mat[-train_ids, ]
 
 y_train = d_resp[train_ids]
 y_test  = d_resp[-train_ids]
 
+# do an elastic net model - a generalized linear model that combines lasso and ridge regression,
+#  it selects the genes or groups of genes that best predict the condition and uses these to build the model
+#  that is then used for classification
+
 # Train model on training dataset using cross-validation
+#  alpha can be between 0 (ridge regression) and 1 (lasso)
+# the res object here is an object that holds the model coeffiecients and the mean error found during training
 res = cv.glmnet(
   x = x_train,
   y = y_train,
@@ -152,6 +250,7 @@ res = cv.glmnet(
 # Test/Make prediction on test dataset
 y_pred = predict(res, newx=x_test, type="class", s="lambda.min")
 
+# confusion matrix shows the TP, TN, FP, and FN
 confusion_matrix = table(y_pred, y_test)
 
 # Evaluation statistics
@@ -160,13 +259,11 @@ print(paste0("Sensitivity: ",sensitivity(confusion_matrix)))
 print(paste0("Specificity: ",specificity(confusion_matrix)))
 print(paste0("Precision: ",precision(confusion_matrix)))
 
-# Getting genes that contribute for the prediction
+# now we can look at the genes that most contribute for the prediction
 res_coef = coef(res, s="lambda.min") # the "coef" function returns a sparse matrix
 
-# get coefficients with non-zero values
+# ignore zero value coefficients
 res_coef = res_coef[res_coef[,1] != 0,]
-dim(res_coef)
-head(res_coef)
 
 # remove first coefficient as this is the intercept, a variable of the model itself
 res_coef = res_coef[-1]
@@ -174,12 +271,20 @@ res_coef = res_coef[-1]
 relevant_genes = names(res_coef) # get names of the (non-zero) variables.
 length(relevant_genes) # number of selected genes
 
+# get the Ensembl gene names
 head(relevant_genes) # few select genes
+
+# get the common gene names
+# TODO fix this
 head(limma_res$voomObj$genes)
 relevant_gene_names = limma_res$voomObj$genes[relevant_genes,"external_gene_name"]
-
 head(relevant_gene_names) # few select genes (with readable names now)
 
+# did elastic net find the same genes originally found by the limma pipeline?
+#  "Of note, we do not expect a high overlap between genes selected by limma and Elastic net. 
+#   The reason for this is the fact Elastic Net criteria bias the selection of genes, 
+#   which are not highly correlated against each other, while not such bias is 
+#   present in limma."
 print(intersect(limma_res$topGenes$ensembl_gene_id, relevant_genes))
 ```
 
@@ -187,6 +292,11 @@ print(intersect(limma_res$topGenes$ensembl_gene_id, relevant_genes))
 <br>\
 Step 5 - Hierarchical clustering
 ```{r}
+# we are only considering the elastic net results to cluster genes together
+# genes in green are original limma results
+# genes in red are normal tissue from the elastic net results
+# genes in black are tumor tissue from the elastic net results
+
  # define the color palette for the plot
 hmcol = colorRampPalette(rev(brewer.pal(9, "RdBu")))(256)
 
