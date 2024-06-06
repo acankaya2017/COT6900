@@ -6,9 +6,12 @@ output:
     df_print: paged
 ---
 Adam Cankaya
+<br>\
 acankaya2017@fau.edu
+<br>\
 Based on tutorial found at https://www.costalab.org/wp-content/uploads/2020/11/R_class_D3.htm
 
+<br>\
 
 First install BiocManager, edgeR, and TCGAbiolinks
 ```{r}
@@ -85,7 +88,8 @@ table(tcga_data@colData$definition)
 # Or see the gender data of 117 female and 314 male
 table(tcga_data@colData$gender)
 
-# To preview the raw gene counts let's look at the expression levels of the first 6 genes in the first 10 samples...
+# To preview the raw gene counts let's look at the expression levels of the first 
+#  6 genes in the first 10 samples...
 head(assay(tcga_data)[,1:10])
 
 # And let's look at the various names of the first 6 genes...
@@ -102,11 +106,13 @@ Step 2 - Generate DEGList, filter low counts, and normalize data
 # The pipeline function will take in three input parameters:
 #   tcga_data - the data object we created in Step 1
 #   condition_variable - the variable by which we will group patients (tumor vs normal)
-#   reference_group - indicates which of the condition variable values is the reference group (no tumors)
+#   reference_group - indicates which of the condition variable
+#    values is the reference group (no tumors)
 # The pipeline will return a list of three objects:
 #   voom - the TMM normalized data returned by running voom
 #   eBayes - the fitted model returned by running eBayes
-#   topTable - a simple table which contains the top 100 differentially expressed genes sorted by p.value
+#   topTable - a simple table which contains the top 100 differentially expressed genes 
+#    sorted by p.value
 limma_pipeline = function(
   tcga_data,
   condition_variable,
@@ -118,8 +124,9 @@ limma_pipeline = function(
   design_factor = colData(tcga_data)[, condition_variable, drop=T] # definition
   group = factor(design_factor) # Solid Normal Tissue
   
+  # otherwise just pick the first class as the reference class
   if (!is.null(reference_group)) {
-    group = relevel(group, ref=reference_group) # otherwise just pick the first class as the reference class
+    group = relevel(group, ref=reference_group) 
   }
 
   # make the design matrix
@@ -136,13 +143,14 @@ limma_pipeline = function(
 
   # filtering - by default genes with less than 10 reads are removed
   keep = filterByExpr(dge,design) # genes which meet are left after filtering
-  dge = dge[keep,,keep.lib.sizes=FALSE] # filter the DGEList object and only keep the genes we want
+  dge = dge[keep,,keep.lib.sizes=FALSE] # filter the DGEList object, only keep the genes we want
   rm(keep) # remove this object from memory because we are done with it
 
   # Normalization (TMM followed by voom)
   # normalizing - minimize batch effects and variation with the TMM normalization
   # TMM - trimmed mean of M-values
-  # use the voom method to conver the data to have a similar variance as arrays - as required by limma
+  # use the voom method to convert the data to have a similar variance as arrays
+  #  (TODO what is this?)
   dge = calcNormFactors(dge)
   v = voom(dge, design, plot=TRUE)
 
@@ -186,7 +194,7 @@ limma_res = limma_pipeline(
 <br>\
 Step 3 - Visualize
 ```{r}
-# make a function to generate a scatter plot to show a separation of tumor vs normal classification points
+# make a function to generate a scatter plot to show a separation of tumor vs normal points
 plot_PCA = function(voomObj, condition_variable){
   # create a factor
   group = factor(voomObj$targets[, condition_variable])
@@ -234,13 +242,15 @@ x_test  = d_mat[-train_ids, ]
 y_train = d_resp[train_ids]
 y_test  = d_resp[-train_ids]
 
-# do an elastic net model - a generalized linear model that combines lasso and ridge regression,
-#  it selects the genes or groups of genes that best predict the condition and uses these to build the model
+# do an elastic net model - a generalized linear model that 
+#  combines lasso and ridge regression, it selects the genes or groups of genes 
+#  that best predict the condition and uses these to build the model
 #  that is then used for classification
 
 # Train model on training dataset using cross-validation
 #  alpha can be between 0 (ridge regression) and 1 (lasso)
-# the res object here is an object that holds the model coeffiecients and the mean error found during training
+# the res object here is an object that holds the model coeffiecients and the 
+#  mean error found during training
 res = cv.glmnet(
   x = x_train,
   y = y_train,
