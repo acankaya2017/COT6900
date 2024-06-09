@@ -141,10 +141,15 @@ limma_pipeline = function(
                  samples=colData(tcga_data),
                  genes=as.data.frame(rowData(tcga_data)))
 
-  # filtering - by default genes with less than 10 reads are removed
+  # filtering - by default genes with less than 10 counts per million reads are removed
+  # after filtering we have 28087 genes remaining
+  # no need to filter further by logfc or adjusted p-value because all
+  #  entries already meet the cutoff criteria
   keep = filterByExpr(dge,design) # genes which meet are left after filtering
   dge = dge[keep,,keep.lib.sizes=FALSE] # filter the DGEList object, only keep the genes we want
   rm(keep) # remove this object from memory because we are done with it
+  
+  # TODO do we need rpkm() filtering?
 
   # Normalization (TMM followed by voom)
   # normalizing - minimize batch effects and variation with the TMM normalization
@@ -159,7 +164,7 @@ limma_pipeline = function(
   #  then pass it to eBayes to rank the differential expression
   fit = lmFit(v, design)
   fit = eBayes(fit)
-
+  
   # Show top genes
   topGenes = topTable(fit, coef=ncol(design), number=100, sort.by="p")
   print(topGenes)
