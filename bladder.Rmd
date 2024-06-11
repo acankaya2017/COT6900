@@ -102,7 +102,7 @@ firs6genes
 
 <br>\
 <br>\
-Step 2 - Generate DEGList, filter low counts, and normalize data
+Step 2 - Generate DGEList, filter low counts, and normalize data
 ```{r}
 # Before we can perform DEG analysis we need to normalize the data
 # Let's create a limma pipeline to do this...
@@ -119,72 +119,65 @@ Step 2 - Generate DEGList, filter low counts, and normalize data
 limma_pipeline = function(
   tcga_data,
   condition_variable,
-  reference_group=NULL){
+  reference_group=NULL) {
 
-  # Create a design matrix
-  # The factor is the category classifier for the data (tumor vs normal)
-  #  limma requires it to be a factor object
-  design_factor = colData(tcga_data)[, condition_variable, drop=T] # definition
-  group = factor(design_factor) # Solid Normal Tissue
+    # Create a design matrix
+    # The factor is the category classifier for the data (tumor vs normal)
+    #  limma requires it to be a factor object
+    design_factor = colData(tcga_data)[, condition_variable, drop=T] # definition
+    group = factor(design_factor) # Solid Normal Tissue
+    
+    # otherwise just pick the first class as the reference class
+    if (!is.null(reference_group)) {
+      group = relevel(group, ref=reference_group) 
+    }
   
-  # otherwise just pick the first class as the reference class
-  if (!is.null(reference_group)) {
-    group = relevel(group, ref=reference_group) 
-  }
-
-  # make the design matrix
-  design = model.matrix(~ group)
-
-  # generate the DGEList object using the input...
-  #  counts is the raw gene counts (numericla matrix - rows as genes, columns as cases)
-  #  samples is the clinical data (data frame)
-  #  genes is the annotation information (data frame - gene id and names)
-  # the DGEList object returned is a transformed version of tcga_data
-  dge = DGEList(counts=assay(tcga_data),
-                 samples=colData(tcga_data),
-                 genes=as.data.frame(rowData(tcga_data)))
-
-  # filtering - by default genes with less than 10 counts per million reads are removed
-  # after filtering we have 28087 genes remaining
-  # no need to filter further by logfc or adjusted p-value because all
-  #  entries already meet the cutoff criteria
-  keep = filterByExpr(dge,design) # genes which meet are left after filtering
-  dge = dge[keep,,keep.lib.sizes=FALSE] # filter the DGEList object, only keep the genes we want
-  rm(keep) # remove this object from memory because we are done with it
+    # make the design matrix
+    design = model.matrix(~ group)
   
-  # TODO do we need rpkm() filtering?
-
-  # Normalization (TMM followed by voom)
-  # normalizing - minimize batch effects and variation with the TMM normalization
-  # TMM - trimmed mean of M-values
-  # use the voom method to convert the data to have a similar variance as arrays
-  #  (TODO what is this?)
-  dge = calcNormFactors(dge)
-  v = voom(dge, design, plot=TRUE)
-
-  # Fit model to data given design
-  #  fits a series of linear models, one to each probe
-  #  then pass it to eBayes to rank the differential expression
-  fit = lmFit(v, design)
-  fit = eBayes(fit)
+    # generate the DGEList object using the input...
+    #  counts is the raw gene counts (numericla matrix - rows as genes, columns as cases)
+    #  samples is the clinical data (data frame)
+    #  genes is the annotation information (data frame - gene id and names)
+    # the DGEList object returned is a transformed version of tcga_data
+    dge = DGEList(counts=assay(tcga_data),
+                   samples=colData(tcga_data),
+                   genes=as.data.frame(rowData(tcga_data)))
   
-  # Save top genes
-  topGenes = topTable(fit, coef=ncol(design), number=1000, sort.by="p")
-
-  return(
-    list(
-      voomObj=v, # normalized data
-      fit=fit, # fitted model and statistics
-      topGenes=topGenes # the 1000 most differentially expressed genes
+    # filtering - by default genes with less than 10 counts per million reads are removed
+    # after filtering we have 28087 genes remaining
+    # no need to filter further by logfc or adjusted p-value because all
+    #  entries already meet the cutoff criteria
+    keep = filterByExpr(dge,design) # genes which meet are left after filtering
+    dge = dge[keep,,keep.lib.sizes=FALSE] # filter the DGEList object, only keep the genes we want
+    rm(keep) # remove this object from memory because we are done with it
+    
+    # TODO do we need rpkm() filtering?
+  
+    # Normalization (TMM followed by voom)
+    # normalizing - minimize batch effects and variation with the TMM normalization
+    # TMM - trimmed mean of M-values
+    # use the voom method to convert the data to have a similar variance as arrays
+    dge = calcNormFactors(dge)
+    v = voom(dge, design, plot=TRUE)
+  
+    # Fit model to data given design
+    #  fits a series of linear models, one to each probe
+    #  then pass it to eBayes to rank the differential expression
+    fit = lmFit(v, design)
+    fit = eBayes(fit)
+    
+    # Save top genes
+    topGenes = topTable(fit, coef=ncol(design), number=1000, sort.by="p")
+  
+    return(
+      list(
+        voomObj=v, # normalized data
+        fit=fit, # fitted model and statistics
+        topGenes=topGenes # the 1000 most differentially expressed genes
+      )
     )
-  )
 }
-
-# TODO only run the pipeline if we didn't already run it before and save the data to a local file
-#  tcga_data = readRDS(file = "tcga_data.RDS")
-#  saveRDS(object = tcga_data,
-#    file = "tcga_data.RDS",
-#    compress = FALSE)
 
 # Run the pipeline on the tcga_data from step 1 and normal tissue as the reference
 #  "definition" is the column name for the tissue type (tumor vs normal)
@@ -310,7 +303,7 @@ head(relevant_gene_names) # few select genes (with readable names now)
 #   The reason for this is the fact Elastic Net criteria bias the selection of genes, 
 #   which are not highly correlated against each other, while not such bias is 
 #   present in limma."
-print(intersect(limma_res$topGenes$ensembl_gene_id, relevant_genes))
+print(intersect(limma_res$topGenes$gene_name, relevant_gene_names))
 ```
 
 <br>\
