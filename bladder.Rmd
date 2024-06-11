@@ -15,18 +15,25 @@ Based on tutorial found at https://www.costalab.org/wp-content/uploads/2020/11/R
 
 First install BiocManager, edgeR, and TCGAbiolinks
 ```{r}
+ptm <- proc.time()  # start the timer
+
 if (!require("BiocManager", quietly = TRUE))
   install.packages("BiocManager")
 
 BiocManager::install("edgeR")
 BiocManager::install("TCGAbiolinks")
 BiocManager::install("genefilter")
+
+chunk1_time = (proc.time() - ptm)[3] # stop the timer
 ```
 
 <br>\
 <br>\
+TODO - rename steps to match steps from slides
 Step 1 - Load packages, download data from TCGA, and prepare it for DEGList
 ```{r}
+ptm <- proc.time()  # start the timer
+
 library("TCGAbiolinks")
 library("limma")
 library("edgeR")
@@ -43,6 +50,8 @@ library("gProfileR")
 library("genefilter")
 
 setwd('C:/Adam/R/')  # make sure it already exists
+
+ptm <- proc.time()  # start the timer
 
 # Before we perform a GDC query let's look at the TCGA-BLCA data
 # As of June 2024 we should see a case count of 412
@@ -98,6 +107,8 @@ firs6genes = head(assay(tcga_data)[,1:3])
 rownames(firs6genes) = rownames
 colnames(firs6genes) = c("Case 1", "Case 2", "Case 3")
 firs6genes
+
+chunk2_time = (proc.time() - ptm)[3] # stop the timer
 ```
 
 <br>\
@@ -183,17 +194,21 @@ limma_pipeline = function(
 #  "definition" is the column name for the tissue type (tumor vs normal)
 #  "Solid Tissue Normal" is our baseline/control/reference class value
 # The limma_res object returned is a list of 3 objects - voomObj, fit, topGenes
+ptm <- proc.time()  # start the timer
 limma_res = limma_pipeline(
   tcga_data=tcga_data,
   condition_variable="definition",
   reference_group="Solid Tissue Normal"
 )
+chunk3_time = (proc.time() - ptm)[3] # stop the timer
 ```
 
 <br>\
 <br>\
 Step 3 - Visualize
 ```{r}
+ptm <- proc.time()  # start the timer
+
 # make a function to generate a scatter plot to show a separation of tumor vs normal points
 plot_PCA = function(voomObj, condition_variable){
   # create a factor
@@ -218,12 +233,16 @@ TCGAVisualize_volcano(
   y,
   xlab = "logFC",
   title = "Volcano plot of top 1000 genes",)
+
+chunk4_time = (proc.time() - ptm)[3] # stop the timer
 ```
 
 <br>\
 <br>\
 Step 4 - Classification model training, testing, and evaluation
 ```{r}
+ptm <- proc.time()  # start the timer
+
 # TODO need to redo this whole step using WGCNA
 
 # use the expression data that has been normalized
@@ -304,6 +323,8 @@ head(relevant_gene_names) # few select genes (with readable names now)
 #   which are not highly correlated against each other, while not such bias is 
 #   present in limma."
 print(intersect(limma_res$topGenes$gene_name, relevant_gene_names))
+
+chunk5_time = (proc.time() - ptm)[3] # stop the timer
 ```
 
 <br>\
@@ -314,6 +335,8 @@ Step 5 - Hierarchical clustering
 # genes in green are original limma results
 # genes in red are normal tissue from the elastic net results
 # genes in black are tumor tissue from the elastic net results
+
+ptm <- proc.time()  # start the timer
 
  # define the color palette for the plot
 hmcol = colorRampPalette(rev(brewer.pal(9, "RdBu")))(256)
@@ -349,4 +372,18 @@ gene_heatmap = heatmap.2(
   margins=c(1,5)        # Define margin spaces
 )
 
+chunk6_time = (proc.time() - ptm)[3] # stop the timer
+```
+
+Print out the timer values
+```{r}
+cat(paste0(
+  "Chunk 1 finished in ", format(round(chunk1_time, 1), nsmall = 0), "s\n",
+  "Chunk 2 finished in ", format(round(chunk2_time, 1), nsmall = 0), "s\n",
+  "Chunk 3 finished in ", format(round(chunk3_time, 1), nsmall = 0), "s\n",
+  "Chunk 4 finished in ", format(round(chunk4_time, 1), nsmall = 0), "s\n",
+  "Chunk 5 finished in ", format(round(chunk5_time, 1), nsmall = 0), "s\n",
+  "Chunk 6 finished in ", format(round(chunk6_time, 1), nsmall = 0), "s\n",
+  "Total run time: ", format(round(chunk1_time+chunk2_time+
+    chunk3_time+chunk4_time+chunk5_time+chunk6_time, 1), nsmall = 0), "s"))
 ```
