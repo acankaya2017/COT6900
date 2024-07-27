@@ -9,15 +9,13 @@ Adam Cankaya
 <br>\
 acankaya2017@fau.edu
 <br>\
-Based on tutorial found at https://www.costalab.org/wp-content/uploads/2020/11/R_class_D3.htm
-
+Based on tutorials https://www.costalab.org/wp-content/uploads/2020/11/R_class_D3.htm
+and https://bioinformaticsworkbook.org/tutorials/wgcna.html#gsc.tab=0
 <br>\
 
-First install BiocManager, edgeR, TCGAbiolinks, and related packages
+First install BiocManager, edgeR, and TCGAbiolinks
 ```{r}
 ptm <- proc.time()  # start the timer
-
-setwd('C:/Adam/R/')  # make sure it already exists
 
 if (!require("BiocManager", quietly = TRUE))
   install.packages("BiocManager")
@@ -26,10 +24,13 @@ BiocManager::install("edgeR")
 BiocManager::install("TCGAbiolinks")
 BiocManager::install("genefilter")
 BiocManager::install("EDASeq")
-BiocManager::install("clusterProfiler")
-options(connectionObserver = NULL) # problem in loading databases using RSQLite
-BiocManager::install("org.Hs.eg.db")
-BiocManager::install("DOSE")
+# BiocManager::install("clusterProfiler")
+# options(connectionObserver = NULL) # problem in loading databases using RSQLite
+# BiocManager::install("org.Hs.eg.db")
+install.packages(c("tidyverse", "magrittr"))
+BiocManager::install("impute")
+BiocManager::install("preprocessCore")
+BiocManager::install("WGCNA")
 
 chunk1_time = (proc.time() - ptm)[3] # stop the timer
 ```
@@ -55,7 +56,9 @@ library("survminer")
 library("RColorBrewer")
 library("gProfileR")
 library("genefilter")
-library("clusterProfiler")
+# library("clusterProfiler")
+
+setwd('C:/Adam/R/')  # make sure it already exists
 
 ptm <- proc.time()  # start the timer
 
@@ -251,82 +254,172 @@ ptm <- proc.time()  # start the timer
 
 # use the expression data that has been normalized
 # Transpose and make it into a matrix object
-d_mat = as.matrix(t(limma_res$voomObj$E))
+input_mat = as.matrix(t(limma_res$voomObj$E))
 
-# and the clinical feature to distinguish cases ("definition")
-# Make it a factor
-d_resp = as.factor(limma_res$voomObj$targets$definition)
+# or try using the top 1000 genes
+input_mat = as.matrix(t(limma_res$voomObj$E))
 
-# Divide data into training and testing set
-# 75% of samples for training and 25% for testing
+library(tidyverse)     # tidyverse will pull in ggplot2, readr, other useful libraries
+library(magrittr)      # provides the %>% operator
+library(WGCNA)
+allowWGCNAThreads()          # allow up to 4 threads
 
-# Set (random-number-generator) seed so that results are consistent between runs
-set.seed(42)
+# Choose a set of soft-thresholding powers
+powers = c(c(1:10), seq(from = 12, to = 20, by = 2))
 
-# create a vector of booleans to subset the cases
-train_ids = createDataPartition(d_resp, p=0.75, list=FALSE)
+# Call the network topology analysis function
+sft = pickSoftThreshold(
+  input_mat,             # <= Input data
+  #blockSize = 30,
+  powerVector = powers,
+  verbose = 5
+  )
 
-# x is the matrix with normalized expression data
-# y is the vector with the response variable (tumor vs normal)
-x_train = d_mat[train_ids, ]
-x_test  = d_mat[-train_ids, ]
+par(mfrow = c(1,2));
+cex1 = 0.9;
 
-y_train = d_resp[train_ids]
-y_test  = d_resp[-train_ids]
+plot(sft$fitIndices[, 1],
+     -sign(sft$fitIndices[, 3]) * sft$fitIndices[, 2],
+     xlab = "Soft Threshold (power)",
+     ylab = "Scale Free Topology Model Fit, signed R^2",
+     main = paste("Scale independence")
+)
+text(sft$fitIndices[, 1],
+     -sign(sft$fitIndices[, 3]) * sft$fitIndices[, 2],
+     labels = powers, cex = cex1, col = "red"
+)
+abline(h = 0.90, col = "red")
+plot(sft$fitIndices[, 1],
+     sft$fitIndices[, 5],
+     xlab = "Soft Threshold (power)",
+     ylab = "Mean Connectivity",
+     type = "n",
+     main = paste("Mean connectivity")
+)
+text(sft$fitIndices[, 1],
+     sft$fitIndices[, 5],
+     labels = powers,
+     cex = cex1, col = "red")
 
-# do an elastic net model - a generalized linear model that 
-#  combines lasso and ridge regression, it selects the genes or groups of genes 
-#  that best predict the condition and uses these to build the model
-#  that is then used for classification
+picked_power = 5
+temp_cor <- cor       
+cor <- WGCNA::cor         # Force it to use WGCNA cor function (fix a namespace conflict issue)
+netwk <- blockwiseModules(input_mat,                # <= input here
 
-# Train model on training dataset using cross-validation
-#  alpha can be between 0 (ridge regression) and 1 (lasso)
-# the res object here is an object that holds the model coeffiecients and the 
-#  mean error found during training
-res = cv.glmnet(
-  x = x_train,
-  y = y_train,
-  alpha = 0.5,
-  family = "binomial")
+                          # == Adjacency Function ==
+                          power = picked_power,                # <= power here
+                          networkType = "signed",
 
-# Test/Make prediction on test dataset
-y_pred = predict(res, newx=x_test, type="class", s="lambda.min")
+                          # == Tree and Block Options ==
+                          deepSplit = 2,
+                          pamRespectsDendro = F,
+                          # detectCutHeight = 0.75,
+                          minModuleSize = 30,
+                          maxBlockSize = 4000,
 
-# confusion matrix shows the TP, TN, FP, and FN
-confusion_matrix = table(y_pred, y_test)
+                          # == Module Adjustments ==
+                          reassignThreshold = 0,
+                          mergeCutHeight = 0.25,
 
-# Evaluation statistics
-print(confusion_matrix)
-print(paste0("Sensitivity: ",sensitivity(confusion_matrix)))
-print(paste0("Specificity: ",specificity(confusion_matrix)))
-print(paste0("Precision: ",precision(confusion_matrix)))
+                          # == TOM == Archive the run results in TOM file (saves time)
+                          saveTOMs = T,
+                          saveTOMFileBase = "ER",
 
-# now we can look at the genes that most contribute for the prediction
-res_coef = coef(res, s="lambda.min") # the "coef" function returns a sparse matrix
+                          # == Output Options
+                          numericLabels = T,
+                          verbose = 3)
 
-# ignore zero value coefficients
-res_coef = res_coef[res_coef[,1] != 0,]
+cor <- temp_cor     # Return cor function to original namespace
 
-# remove first coefficient as this is the intercept, a variable of the model itself
-res_coef = res_coef[-1]
+# Convert labels to colors for plotting
+mergedColors = labels2colors(netwk$colors)
+# Plot the dendrogram and the module colors underneath
+plotDendroAndColors(
+  netwk$dendrograms[[1]],
+  mergedColors[netwk$blockGenes[[1]]],
+  "Module colors",
+  dendroLabels = FALSE,
+  hang = 0.03,
+  addGuide = TRUE,
+  guideHang = 0.05 )
 
-relevant_genes = names(res_coef) # get names of the (non-zero) variables.
-length(relevant_genes) # number of selected genes
+# netwk$colors[netwk$blockGenes[[1]]]
+# table(netwk$colors)
 
-# get the Ensembl gene names
-head(relevant_genes) # few select genes
+module_df <- data.frame(
+  gene_id = names(netwk$colors),
+  colors = labels2colors(netwk$colors)
+)
 
-# get the common gene names
-head(limma_res$voomObj$genes)
-relevant_gene_names = limma_res$voomObj$genes[relevant_genes,"gene_name"]
-head(relevant_gene_names) # few select genes (with readable names now)
+module_df[1:5,]
 
-# did elastic net find the same genes originally found by the limma pipeline?
-#  "Of note, we do not expect a high overlap between genes selected by limma and Elastic net. 
-#   The reason for this is the fact Elastic Net criteria bias the selection of genes, 
-#   which are not highly correlated against each other, while not such bias is 
-#   present in limma."
-print(intersect(limma_res$topGenes$gene_name, relevant_gene_names))
+write_delim(module_df,
+            file = "gene_modules.txt",
+            delim = "\t")
+
+# Get Module Eigengenes per cluster
+MEs0 <- moduleEigengenes(input_mat, mergedColors)$eigengenes
+
+# Reorder modules so similar modules are next to each other
+MEs0 <- orderMEs(MEs0)
+module_order = names(MEs0) %>% gsub("ME","", .)
+
+# Add case names
+# TODO change this to cancer vs control
+MEs0$case = row.names(MEs0)
+
+# tidy & plot data
+mME = MEs0 %>%
+  pivot_longer(-case) %>%
+  mutate(
+    name = gsub("ME", "", name),
+    name = factor(name, levels = module_order)
+  )
+
+mME %>% ggplot(., aes(x=case, y=name, fill=value)) +
+  geom_tile() +
+  theme_bw() +
+  scale_fill_gradient2(
+    low = "blue",
+    high = "red",
+    mid = "white",
+    midpoint = 0,
+    limit = c(-1,1)) +
+  theme(axis.text.x = element_text(angle=90)) +
+  labs(title = "Module-trait Relationships", y = "Modules", fill="corr")
+
+# pick out a few modules of interest here
+modules_of_interest = c("green", "turquoise", "tan")
+
+# Pull out list of genes in that module
+submod = module_df %>%
+  subset(colors %in% modules_of_interest)
+
+row.names(module_df) = module_df$gene_id
+
+# # Get normalized expression for those genes
+# expr_normalized[1:5,1:10]
+# subexpr = expr_normalized[submod$gene_id,]
+# 
+# submod_df = data.frame(subexpr) %>%
+#   mutate(
+#     gene_id = row.names(.)
+#   ) %>%
+#   pivot_longer(-gene_id) %>%
+#   mutate(
+#     module = module_df[gene_id,]$colors
+#   )
+# 
+# submod_df %>% ggplot(., aes(x=name, y=value, group=gene_id)) +
+#   geom_line(aes(color = module),
+#             alpha = 0.2) +
+#   theme_bw() +
+#   theme(
+#     axis.text.x = element_text(angle = 90)
+#   ) +
+#   facet_grid(rows = vars(module)) +
+#   labs(x = "treatment",
+#        y = "normalized expression")
 
 chunk5_time = (proc.time() - ptm)[3] # stop the timer
 ```
@@ -381,82 +474,44 @@ chunk6_time = (proc.time() - ptm)[3] # stop the timer
 
 <br>\
 <br>\
-Step 6 - GO Gene set enrichment analysis (GSEA)
+Step 6 - Gene Ontology (GO) Enrichment Analysis (EA)
 ```{r}
-library('org.Hs.eg.db') 
-
-ptm <- proc.time()  # start the timer
-
-##### we look at GO Gene Set Enrichment Analysis of the up regulator genes
-
-### First we will use the limma pipeline topGenes results (top 1000 genes)
-
-# TODO try top 100 instead
-
-# filter the genes by logFC value to find the up regulators
-up_reg_genes_limma = limma_res$topGenes[limma_res$topGenes$logFC > 1,]
+# filter the relevant_gene_names by logFC value to find the up regulators
+up_reg_genes = limma_res$topGenes[limma_res$topGenes$logFC < 1,]
 
 # create the geneList as required by clusterProfiler
 # save the gene name to first column and the logFC to second column
-up_reg_genes_limma_names = up_reg_genes_limma[up_reg_genes_limma$gene_name %in% limma_res$topGenes$gene_name,]$gene_name
-up_reg_genes_limma_logFC = up_reg_genes_limma[up_reg_genes_limma$gene_name %in% limma_res$topGenes$gene_name,]$logFC
-geneList_limma_up = up_reg_genes_limma_logFC
-names(geneList_limma_up) = as.character(up_reg_genes_limma_names)
-geneList_limma_up = sort(geneList_limma_up, decreasing = TRUE)
-print(head(names(geneList_limma_up)))
+up_reg_genes_names = up_reg_genes[up_reg_genes$gene_name %in% relevant_gene_names,]$gene_name
+up_reg_genes_logFC = up_reg_genes[up_reg_genes$gene_name %in% relevant_gene_names,]$logFC
+geneList_up = up_reg_genes_logFC
+names(geneList_up) = as.character(up_reg_genes_names)
+geneList_up = sort(geneList_up, decreasing = TRUE)
 
-go_limma_up <- gseGO(geneList  = geneList_limma_up,
-              OrgDb        = org.Hs.eg.db,
-              ont          = "ALL",
-              minGSSize    = 100,
-              maxGSSize    = 500,
-              pvalueCutoff = 1, # set to 1 to get all results
-              verbose      = TRUE,
-              keyType      = "SYMBOL",
-              scoreType    = "pos"
-              )
-# View(go_limma_up@result)
-
-##### let us also look at the down regulators
-
-down_reg_limma_genes = limma_res$topGenes[limma_res$topGenes$logFC < -1,]
-View(down_reg_limma_genes)
-down_reg_limma_genes_names = down_reg_limma_genes[down_reg_limma_genes$gene_name %in% limma_res$topGenes$gene_name,]$gene_name
-down_reg_limma_genes_logFC = down_reg_limma_genes[down_reg_limma_genes$gene_name %in% limma_res$topGenes$gene_name,]$logFC
-geneList_limma_down = down_reg_limma_genes_logFC
-names(geneList_limma_down) = as.character(down_reg_limma_genes_names)
-geneList_limma_down = sort(geneList_limma_down, decreasing = TRUE)
-print(head(names(geneList_limma_down)))
-
-go_limma_down<- gseGO(geneList  = geneList_limma_down,
+ego3 <- gseGO(geneList     = geneList_up,
               OrgDb        = org.Hs.eg.db,
               ont          = "ALL",
               # minGSSize    = 100,
               # maxGSSize    = 500,
-              pvalueCutoff = 1, # set to 1 to get all results
+              # pvalueCutoff = 0.05,
               verbose      = TRUE,
               keyType      = "SYMBOL",
-              scoreType    = "neg"
+              # scoreType    = "pos"
               )
-View(go_limma_down@result)
 
-require(DOSE)
-# dotplot(go_limma_up, showCategory=10, split=".sign") + facet_grid(.~.sign)
-dotplot(go_limma_down, showCategory=10, split=".sign") + facet_grid(.~.sign)
-
-chunk7_time = (proc.time() - ptm)[3] # stop the timer
+# and find the down regulators
+down_reg_genes = limma_res$topGenes[limma_res$topGenes$logFC < -1,]
+down_reg_genes = down_reg_genes[down_reg_genes$gene_name %in% relevant_gene_names,]$gene_name
 ```
 
 Print out the timer values
 ```{r}
 cat(paste0(
-  "Chunk 1 (install packages) finished in ", format(round(chunk1_time, 1), nsmall = 0), "s\n",
-  "Chunk 2 (download/load TCGA data) finished in ", format(round(chunk2_time, 1), nsmall = 0), "s\n",
-  "Chunk 3 (DGE, data normalization) finished in ", format(round(chunk3_time, 1), nsmall = 0), "s\n",
-  "Chunk 4 (volcano plot) finished in ", format(round(chunk4_time, 1), nsmall = 0), "s\n",
-  "Chunk 5 (Elastic net model) finished in ", format(round(chunk5_time, 1), nsmall = 0), "s\n",
-  "Chunk 6 (Hierarchical clustering) finished in ", format(round(chunk6_time, 1), nsmall = 0), "s\n",
-  "Chunk 7 (GSEA) finished in ", format(round(chunk7_time, 1), nsmall = 0), "s\n",
+  "Chunk 1 finished in ", format(round(chunk1_time, 1), nsmall = 0), "s\n",
+  "Chunk 2 finished in ", format(round(chunk2_time, 1), nsmall = 0), "s\n",
+  "Chunk 3 finished in ", format(round(chunk3_time, 1), nsmall = 0), "s\n",
+  "Chunk 4 finished in ", format(round(chunk4_time, 1), nsmall = 0), "s\n",
+  "Chunk 5 finished in ", format(round(chunk5_time, 1), nsmall = 0), "s\n",
+  "Chunk 6 finished in ", format(round(chunk6_time, 1), nsmall = 0), "s\n",
   "Total run time: ", format(round(chunk1_time+chunk2_time+
-    chunk3_time+chunk4_time+chunk5_time+chunk6_time+chunk7_time, 1), nsmall = 0), "s"))
+    chunk3_time+chunk4_time+chunk5_time+chunk6_time, 1), nsmall = 0), "s"))
 ```
