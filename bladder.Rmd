@@ -1,0 +1,527 @@
+---
+title: "Bladder cohort - R Notebook"
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+---
+Adam Cankaya
+<br>\
+acankaya2017@fau.edu
+<br>\
+Based on tutorials found at 
+https://www.costalab.org/wp-content/uploads/2020/11/R_class_D3.htm
+https://alexslemonade.github.io/refinebio-examples/04-advanced-topics/network-analysis_rnaseq_01_wgcna.html
+https://github.com/hamidghaedi/RNA-seq-differential-expression
+<br>\
+<br>\
+Step 1 - Install & load packages, download data from TCGA, and prepare it for EdgeR
+```{r}
+r = getOption("repos")
+r["CRAN"] = "http://cran.us.r-project.org"
+options(repos = r)
+
+if (!require("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+
+BiocManager::install("TCGAbiolinks")
+BiocManager::install("GO.db")
+BiocManager::install("preprocessCore")
+BiocManager::install("WGCNA")
+BiocManager::install("DESeq2")
+BiocManager::install("org.Hs.eg.db")
+
+# knit to PDF
+# install.packages("tinytex")
+# tinytex::install_tinytex()
+
+install.packages("ggforce")
+install.packages('VennDiagram')
+
+library("TCGAbiolinks")
+library("limma")
+library("SummarizedExperiment")
+library("gprofiler2")
+library("tidyverse")
+library("magrittr")
+library("WGCNA")
+library("ggforce")
+library("doParallel")
+library("org.Hs.eg.db")
+library("AnnotationDbi")
+library("edgeR")
+library("glmnet")
+library("factoextra")
+library("FactoMineR")
+library("caret")
+library("SummarizedExperiment")
+library("gplots")
+library("survival")
+library("survminer")
+library("RColorBrewer")
+library("gProfileR")
+library("genefilter")
+library("VennDiagram")
+
+setwd('C:/Adam/R/')  # make sure it already exists
+
+if (file.exists("bladder_workspace.RData")) {
+  load("bladder_workspace.RData") # load the saved workspace
+}
+
+# Before we perform a GDC query let's look at the TCGA-BLCA data
+# As of June 2025 we should see a case count of 412
+TCGAbiolinks:::getProjectSummary("TCGA-BLCA")
+
+# Download TCGA-BLCA data from GDC
+# We want the complete RNA sequencing and raw gene count data 
+# So we run a query of the Transcriptome Profiling category and RNA-Seq experimental type
+# We use the STAR - Counts workflow type because it contains the raw gene counts we need
+# We ignore other sample types besides tumor and normal
+# The original paper by Wang uses the HTSeq-counts workflow, but this is a legacy version 
+#  of the new STAR - COUNTS workflow type
+
+# Run the query and format it as a table
+# The results are a table with 431 rows (because some patients have multiple cases each)
+# There are 29 columns with meta data about each case such as sample_type (tumor vs normal)
+# Only run the query if we don't have results already saved
+# TODO use GDCdownload and GDCprepare to save data to local file
+if (!exists("lihc_res") || is.null(lihc_res) || !length(lihc_res) || is_empty(lihc_res)) {
+  query_TCGA = GDCquery(
+    project = "TCGA-BLCA",
+    data.category = "Transcriptome Profiling",
+    data.type="Gene Expression Quantification",
+    experimental.strategy = "RNA-Seq",
+    workflow.type = "STAR - Counts",
+    sample.type = c("Primary Tumor", "Solid Tissue Normal"))
+
+  lihc_res = getResults(query_TCGA)
+  
+  # We can create a summary table shows there are 412 tumor and 19 normal (412+19=431)
+  summary(factor(lihc_res$sample_type))
+  
+  # Go ahead and download all the data from GDC to our working directory
+  GDCdownload(query = query_TCGA)
+  
+  # Now load the RNA-Seq data from the files into R workspace which we will save to file later
+  tcga_data = GDCprepare(query_TCGA)
+}
+
+# This data object has 60660 rows and 431 columns
+# This indicates there are 60660 different genes found throughout all the cases
+# The object contains both clinical and expression data
+dim(tcga_data)
+
+# We can access the data in the object like this which verifies 412 tumor and 19 normal
+table(tcga_data@colData$definition)
+
+# let's look at the first six rows (genes)
+head(rowData(tcga_data))
+
+# To preview the raw gene counts let's look at the expression levels of the first 
+#  6 genes in the first 3 cases...
+rownames = values(tcga_data)$gene_name[1:6]
+first6genes = head(assay(tcga_data)[,1:3])
+rownames(first6genes) = rownames
+colnames(first6genes) = c("Case 1", "Case 2", "Case 3")
+first6genes
+```
+
+<br>\
+<br>\
+Step 2 - Generate DGEList, filter low counts, and normalize data
+```{r}
+# *******************************************************************************
+# Before we can perform DEG analysis we need to normalize the data
+# Let's create a limma pipeline to do this...
+# The pipeline function will take in three input parameters:
+#   tcga_data - the data object we created in Step 1
+#   condition_variable - the variable by which we will group patients (tumor vs normal)
+#   reference_group - indicates which of the condition variable values is the reference group (normal)
+# The pipeline will return a list of three objects:
+#   voom - the TMM normalized data returned by running voom
+#   eBayes - the fitted model returned by running eBayes
+#   topTable - a simple table which contains the top 1000 differentially expressed genes 
+#    sorted by p.value
+# *******************************************************************************
+limma_pipeline = function(
+  tcga_data,
+  condition_variable,
+  reference_group=NULL) {
+
+    # Create a design matrix
+    # The factor is the category classifier for the data (tumor vs normal)
+    #  limma requires it to be a factor object
+    design_factor = colData(tcga_data)[, condition_variable, drop=T] # definition
+    group = factor(design_factor) # Solid Normal Tissue
+    
+    # otherwise just pick the first class as the reference class
+    if (!is.null(reference_group)) {
+      group = relevel(group, ref=reference_group) 
+    }
+  
+    # make the design matrix
+    design = model.matrix(~ group)
+  
+    # generate the DGEList object using the input...
+    #  counts is the raw gene counts (numericla matrix - rows as genes, columns as cases)
+    #  samples is the clinical data (data frame)
+    #  genes is the annotation information (data frame - gene id and names)
+    # the DGEList object returned is a transformed version of tcga_data
+    dge = DGEList(counts=assay(tcga_data),
+                   samples=colData(tcga_data),
+                   genes=as.data.frame(rowData(tcga_data)))
+  
+    # filtering - by default genes with less than 10 counts per million reads are removed
+    # after filtering we have 28087 genes remaining
+    # no need to filter further by logfc or adjusted p-value because all
+    #  entries already meet the cutoff criteria
+    keep = filterByExpr(dge,design) # genes which meet are left after filtering
+    dge = dge[keep,,keep.lib.sizes=FALSE] # filter the DGEList object, only keep the genes we want
+    rm(keep) # remove this object from memory because we are done with it
+    
+    # TODO do we need rpkm() filtering?
+  
+    # Normalization (TMM followed by voom)
+    # normalizing - minimize batch effects and variation with the TMM normalization
+    # TMM - trimmed mean of M-values
+    # use the voom method to convert the data to have a similar variance as arrays
+    dge = calcNormFactors(dge)
+    v = voom(dge, design, plot=TRUE)
+  
+    # Fit model to data given design
+    #  fits a series of linear models, one to each probe
+    #  then pass it to eBayes to rank the differential expression
+    fit = lmFit(v, design)
+    fit = eBayes(fit)
+    
+    # Save top genes
+    topGenes = topTable(fit, coef=ncol(design), number=1000, sort.by="p")
+  
+    return(
+      list(
+        voomObj=v, # normalized data
+        fit=fit, # fitted model and statistics
+        topGenes=topGenes # the 1000 most differentially expressed genes
+      )
+    )
+}
+
+# Run the pipeline on the tcga_data from step 1 and normal tissue as the reference
+#  "definition" is the column name for the tissue type (tumor vs normal)
+#  "Solid Tissue Normal" is our baseline/control/reference class value
+# The limma_res object returned is a list of 3 objects - voomObj, fit, topGenes
+limma_res = limma_pipeline(
+  tcga_data=tcga_data,
+  condition_variable="definition",
+  reference_group="Solid Tissue Normal"
+)
+
+# TODO why are we doing this?
+# clinical data
+clinical <- data.frame(tcga_data@colData)
+# replace spaces with "_" in levels of definition column
+clinical$definition <-  gsub(" ", "_", clinical$definition)
+# make the definition column a factor
+clinical$definition <- as.factor(clinical$definition)
+# relevel to ensure tumors are compared to normal tissue.
+levels(clinical$definition)
+clinical$definition <- relevel(clinical$definition, ref = "Solid_Tissue_Normal")
+```
+
+<br>\
+<br>\
+Step 3 - Visualize DEGs with a scatter plot, a heatmap, and a volcano plot
+```{r}
+# *****************************************************************************
+# generate a scatter plot to show a separation of tumor vs normal points
+# *****************************************************************************
+plot_PCA = function(voomObj, condition_variable) {
+  # create a factor
+  group = factor(voomObj$targets[, condition_variable])
+  # perform a principal component analysis 
+  pca = prcomp(t(voomObj$E))
+  # Take PC1 and PC2 for the plot
+  plot(pca$x[,1:2],col=group, pch=19)
+  # include a legend for points
+  legend("bottom", inset=.01, levels(group), pch=19, col=1:length(levels(group)))
+  title("Principle Component Analysis")
+  return(pca)
+}
+
+# call the plot function with the voom object and the definition column
+res_pca = plot_PCA(limma_res$voomObj, "definition")
+
+# *** create a volcano plot ***
+x = limma_res$topGenes$logFC
+y = limma_res$topGenes$adj.P.Val
+TCGAVisualize_volcano(
+  x,
+  y,
+  xlab = "logFC",
+  title = "Volcano plot of top 1000 genes",
+  filename = "volcano_top1000.pdf"
+)
+
+# *** create a heatmap (hierarchical clustering) ***
+# define the color palette for the plot
+hmcol = colorRampPalette(rev(brewer.pal(9, "RdBu")))(256)
+
+# perform complete linkage clustering
+clust = function(x) hclust(x, method="complete")
+# use the inverse of correlation as distance.
+dist = function(x) as.dist((1-cor(t(x)))/2)
+
+d_mat = as.matrix(t(limma_res$voomObj$E))
+d_resp = as.factor(limma_res$voomObj$targets$definition)
+
+gene_heatmap = heatmap.2(
+  t(d_mat[,limma_res$topGenes$gene_id]),
+  scale="row",          # scale the values for each gene (row)
+  density.info="none",  # turns off density plot inside color legend
+  trace="none",         # turns off trace lines inside the heat map
+  col=hmcol,            # define the color map
+  labCol=FALSE,         # Not showing column labels
+  ColSideColors=as.character(as.numeric(d_resp)), # Show colors for each response class
+  dendrogram="both",    # Show dendrograms for both axis
+  hclust = clust,       # Define hierarchical clustering method
+  distfun = dist,       # Using correlation coefficient for distance function
+  cexRow=.6,            # Resize row labels
+  margins=c(1,5)        # Define margin spaces
+)
+```
+
+<br>\
+<br>\
+Step 4 - Run WGCNA to find gene modules
+```{r}
+# ******************************************************
+# prints a plot for a given gene module_name
+# ******************************************************
+plot_module <- function(module_name) {
+  print(
+    ggplot(
+      module_df,
+      aes(
+        x = definition,
+        y = module_name,
+        color = definition
+      )
+    ) +
+    # a boxplot with outlier points hidden (they will be in the sina plot)
+    geom_boxplot(width = 0.2, outlier.shape = NA) +
+    # A sina plot to show all of the individual data points
+    ggforce::geom_sina(maxwidth = 0.3) +
+    theme_classic()
+  )
+}
+
+# ******************************************************
+# Returns a string of genes belonging to a given module
+# ******************************************************
+get_module_genes <- function(module_name) {
+  gene_module_key <- tibble::enframe(bwnet$colors, name = "gene", value = "module") %>%
+    # Let's add the `ME` part so its more clear what these numbers are and it matches elsewhere
+    dplyr::mutate(module = paste0("ME", module))
+  gene_module_key %>%
+    dplyr::filter(module == module_name)
+  
+  # *** For easy reading let's convert from ENSEMBLE to gene symbols ***
+  module_genes_ensembl <- gene_module_key[gene_module_key$module == module_name,]
+  # convert to numeric to trim off the decimal place which represents the ensembl version
+  module_genes_ensembl_numeric <- sub("\\..*", "", module_genes_ensembl$gene)
+  # convert from ensembl to regular gene symbols and names
+  module_genes <- select(org.Hs.eg.db, keys = module_genes_ensembl_numeric, 
+                        keytype = 'ENSEMBL', columns = c('SYMBOL', "GENENAME"))
+  # remove NA's
+  module_genes <- na.omit(module_genes)
+  print(head(module_genes))
+  
+  # save as string for sending to AI
+  module_genes_string <- paste(module_genes$SYMBOL, collapse=' ')
+  
+  return(module_genes_string)
+}
+
+# Calculate adjacency threshold parameter value using the normalized data from limma
+if (!exists("sft") || is.null(sft) || !length(sft) || is_empty(sft)) {
+  sft <- pickSoftThreshold(d_mat,
+    dataIsExpr = TRUE,
+    corFnc = cor,
+    networkType = "signed"
+  )
+}
+  
+# Calculate the signed R^2 (measure of model fit)
+sft_df <- data.frame(sft$fitIndices) %>%
+  dplyr::mutate(model_fit = -sign(slope) * SFT.R.sq)
+  
+# plot model fitting by the power soft threshold
+ggplot(sft_df, aes(x = Power, y = model_fit, label = Power)) +
+# Plot the points
+geom_point() +
+# Put the Power labels  above the data points
+geom_text(nudge_y = 0.1) +
+# Plot what WGCNA recommends as an R^2 cutoff
+geom_hline(yintercept = 0.80, col = "red") +
+# Make sure we can still see low levels
+ylim(c(min(sft_df$model_fit), 1.05)) +
+# Adjust axis
+xlab("Soft Threshold (power)") +
+ylab("Scale Free Topology Model Fit, signed R^2") +
+ggtitle("Scale independence") +
+# Add some aesthetics
+theme_classic()
+  
+# *** the plot shows a peak positive inflection around a soft threshold power of 12 so we use that ***
+
+# run WGCNA to find gene co-expression modules
+
+# use saved network if available
+if (file.exists("2025_05_22_wgcna_results.RDS")) {
+    bwnet <- readRDS("2025_05_22_wgcna_results.RDS")
+} else {
+    bwnet <- blockwiseModules(d_mat,
+      maxBlockSize = 25000, # What size chunks (how many genes) the calculations should be run in
+      TOMType = "signed", # topological overlap matrix
+      power = 12, # soft threshold for network construction
+      numericLabels = TRUE, # Let's use numbers instead of colors for module labels
+      randomSeed = 1234, # there's some randomness associated with this calculation so we should set a seed
+    )
+    # save result for loading later
+    readr::write_rds(bwnet, "2025_05_22_wgcna_results.RDS")
+}
+
+module_eigengenes <- bwnet$MEs
+head(module_eigengenes)
+
+# make sure samples are in same order
+all.equal(clinical$barcode, rownames(module_eigengenes))
+
+# Create the design matrix from the definition variable (tumor vs normal)
+des_mat <- model.matrix(~clinical$definition)
+
+# Run linear model on each module. 
+# limma wants our tests to be per row and lmFit() needs a transposed version of matrix
+fit <- limma::lmFit(t(module_eigengenes), design = des_mat)
+    
+# Apply empirical Bayes to smooth standard errors
+fit <- limma::eBayes(fit)
+    
+# Apply multiple testing correction and obtain stats in a data frame
+stats_df <- limma::topTable(fit, number = ncol(module_eigengenes)) %>%
+  tibble::rownames_to_column("module")
+
+# look at the most significant modules
+head(stats_df)
+
+# put the modules into a data frame
+module_df <- module_eigengenes %>%
+  tibble::rownames_to_column("barcode") %>%
+# Here we are performing an inner join with a subset of metadata
+dplyr::inner_join(clinical %>%
+  dplyr::select(barcode, definition),
+  by = c("barcode" = "barcode")
+)
+
+# *** The most significant module with positive log fc is ME3 (more associated with tumors)***
+ME3_genes <- get_module_genes("ME3")
+plot_module("ME3")
+
+# *** The most significant module with negative log fc is ME5 (more associated with normal tissue)***
+ME5_genes <- get_module_genes("ME5")
+plot_module("ME5")
+
+# Calculate the adjacency matrix
+# adj_mat <- adjacency(d_mat, power=12, corFnc="bicor", type="signed",  corOptions = "use = 'p'")
+
+# Calculate the topological overlap matrix (TOM)
+# TOM <- TOMsimilarityFromExpr(d_mat, power = 12)
+```
+
+<br>\
+<br>\
+Step 5 - Generate venn diagrams and other visuals
+```{r}
+module_genes <- tibble::enframe(bwnet$colors, name = "gene", value = "module") %>%
+  dplyr::mutate(module = paste0("ME", module))
+
+# *** Show venn diagram overlap between module genes and DEGs (positive log fc) ***
+
+# TODO make this work with a character map of all the module names
+# top_5_positive_modules <- head(arrange(stats_df, desc(logFC)), 5)
+# target <- strsplit(top_5_positive_modules$module, " ") %>% paste(collapse = "|")
+# the top five positive logfc modules are ME3, ME23, ME6, ME21, ME11
+# top_5_negative_modules <- head(arrange(stats_df, logFC), 5)
+# target <- strsplit(top_5_negative_modules$module, " ") %>% paste(collapse = "|")
+# the top five negative logfc modules are ME5, ME7, ME2, ME14, ME1
+
+positive_module_genes_ensembl <- module_genes %>%
+  dplyr::filter(module == "ME3" | module == "ME23" | module == "ME6"
+                | module == "ME21" | module == "ME11")
+# convert to numeric to trim off the decimal place which represents the ensembl version
+positive_module_genes_ensembl_numeric <- sub("\\..*", "", positive_module_genes_ensembl$gene)
+# convert from ensembl to regular gene symbols and names
+positive_module_genes_ensembl <- select(org.Hs.eg.db, keys = positive_module_genes_ensembl_numeric, 
+                      keytype = 'ENSEMBL', columns = c('SYMBOL', "GENENAME"))
+# remove NA's
+positive_module_genes_ensembl <- na.omit(positive_module_genes_ensembl)
+
+positive_degs <- na.omit(limma_res$topGenes[limma_res$topGenes$logFC > 0,]$gene_name)
+
+venn.diagram(
+  main = "Positive logFC (high exp in tumor tissue) - Module genes vs DEGs",
+  x = list(positive_degs, positive_module_genes_ensembl$SYMBOL),
+  category.names = c("DEGs", "Module genes (ME3,ME23,ME6,ME21,ME11)"),
+  cat.pos = c(225,180),
+  filename = 'Positive_LogFC-Module_genes_vs_DEGs.png',
+  output=TRUE,
+  col=c("darkorchid2", "cadetblue1"),
+  fil=c("darkorchid2", "cadetblue1")
+)
+
+# *** Show overlap between module genes and DEGs (negative log fc) ***
+module_genes <- tibble::enframe(bwnet$colors, name = "gene", value = "module") %>%
+  dplyr::mutate(module = paste0("ME", module))
+negative_module_genes_ensembl <- module_genes %>%
+  dplyr::filter(module == "ME5" | module == "ME7" | module == "ME2"
+                | module == "ME14" | module == "ME1")
+# convert to numeric to trim off the decimal place which represents the ensembl version
+negative_module_genes_ensembl_numeric <- sub("\\..*", "", negative_module_genes_ensembl$gene)
+# convert from ensembl to regular gene symbols and names
+negative_module_genes_ensembl <- select(org.Hs.eg.db, keys = negative_module_genes_ensembl_numeric, 
+                      keytype = 'ENSEMBL', columns = c('SYMBOL', "GENENAME"))
+# remove NA's
+negative_module_genes_ensembl <- na.omit(negative_module_genes_ensembl)
+  
+negative_degs <- na.omit(limma_res$topGenes[limma_res$topGenes$logFC < 0,]$gene_name)
+
+venn.diagram(
+  main = "Negative logFC (high exp in normal tissue) - Module genes vs DEGs",
+  x = list(negative_module_genes_ensembl$SYMBOL, negative_degs),
+  category.names = c("Module genes (ME5,ME7,ME2,ME14,ME1)" , "DEGs"),
+  cat.pos = c(0,45),
+  filename = 'Negative_LogFC-Module_genes_vs_DEGs.png',
+  output=TRUE,
+  col=c("darkorchid2", "cadetblue1"),
+  fil=c("darkorchid2", "cadetblue1")
+)
+
+# *** Create gene clustering tree (dendrogram) of TCGA modules ***
+
+```
+
+<br>\
+<br>\
+Step 6 -
+   a) experiment with parameters such as blocksize, soft threshold, more filtering...look at original paper's values
+   b) examine all significant modules
+   c) add timer code and speed enhancements (saving results to hd, multi-threading, AI?, cloud?, doParallel?)
+   d) AI enhancements (Posit?, ask AI to speed up my code?)
+   e) library(doParallel) registerDoParallel(cores=4)
+   f) allowWGCNAThreads(8) 
+   g) other TODOs
+```{r}
+  # Save the workspace for future loading
+  save.image(file = "bladder_workspace.RData")
+```

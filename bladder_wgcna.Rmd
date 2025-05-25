@@ -11,56 +11,49 @@ acankaya2017@fau.edu
 <br>\
 Based on tutorials found at https://www.costalab.org/wp-content/uploads/2020/11/R_class_D3.htm
  and https://alexslemonade.github.io/refinebio-examples/04-advanced-topics/network-analysis_rnaseq_01_wgcna.html and https://github.com/hamidghaedi/RNA-seq-differential-expression
-<br>\
 
-First install packages
+<br>\
+<br>\
+Step 1 - Install & load packages, download data from TCGA, and prepare it for DESeq
 ```{r}
+r = getOption("repos")
+r["CRAN"] = "http://cran.us.r-project.org"
+options(repos = r)
+
 if (!require("BiocManager", quietly = TRUE))
   install.packages("BiocManager")
 
-# BiocManager::install("edgeR")
 BiocManager::install("TCGAbiolinks")
-# BiocManager::install("genefilter")
 BiocManager::install("GO.db")
 BiocManager::install("preprocessCore")
 BiocManager::install("WGCNA")
 BiocManager::install("DESeq2")
+BiocManager::install("org.Hs.eg.db")
 
 install.packages("ggforce")
-```
 
-<br>\
-<br>\
-Step 1 - Load packages, download data from TCGA, and prepare it for DESeq
-```{r}
 library("TCGAbiolinks")
 library("limma")
-# library("edgeR")
-# library("glmnet")
-# library("factoextra")
-# library("FactoMineR")
-# library("caret")
 library("SummarizedExperiment")
-# library("gplots")
-# library("survival")
-# library("survminer")
-# library("RColorBrewer")
-# library("gProfileR")
-# library("genefilter")
-# library("tidyverse")
+library(gprofiler2)
+library("tidyverse")
 library("magrittr")
 library("WGCNA")
 library("ggforce")
 library("DESeq2")
 library("doParallel")
+library("org.Hs.eg.db")
+library("AnnotationDbi")
 
 setwd('C:/Adam/R/')  # make sure it already exists
+
+if (file.exists("bladder_wgcna_workspace.RData")) {
+  load("bladder_wgcna_workspace.RData") # load the saved workspace
+}
 
 # Before we perform a GDC query let's look at the TCGA-BLCA data
 # As of June 2024 we should see a case count of 412
 TCGAbiolinks:::getProjectSummary("TCGA-BLCA")
-
-# TODO save data locally so we dont download it everytime
 
 # Download TCGA-BLCA data from GDC
 # We want the complete RNA sequencing and raw gene count data 
@@ -80,16 +73,18 @@ query_TCGA = GDCquery(
 # Run the query and format it as a table
 # The results are a table with 431 rows (because some patients have multiple cases each)
 # There are 29 columns with meta data about each case such as sample_type (tumor vs normal)
-lihc_res = getResults(query_TCGA)
-
-# We can create a summary table shows there are 412 tumor and 19 normal (412+19=431)
-summary(factor(lihc_res$sample_type))
-
-# Go ahead and download all the data from GDC to our working directory
-GDCdownload(query = query_TCGA)
-
-# Now load the RNA-Seq data from the files into R workspace
-tcga_data = GDCprepare(query_TCGA)
+if (!exists("lihc_res") || is.null(lihc_res) || !length(lihc_res) || is_empty(lihc_res)) {
+  lihc_res = getResults(query_TCGA)
+  
+  # We can create a summary table shows there are 412 tumor and 19 normal (412+19=431)
+  summary(factor(lihc_res$sample_type))
+  
+  # Go ahead and download all the data from GDC to our working directory
+  GDCdownload(query = query_TCGA)
+  
+  # Now load the RNA-Seq data from the files into R workspace which we will save to file later
+  tcga_data = GDCprepare(query_TCGA)
+}
 
 # This data object has 60660 rows and 431 columns
 # This indicates there are 60660 different genes found throughout all the cases
@@ -115,7 +110,7 @@ firs6genes
 <br>\
 Step 2 - Use DESeq to normalize data
 ```{r}
-# exp matrix
+# rna expression data
 rna <- as.data.frame(SummarizedExperiment::assay(tcga_data))
 # clinical data
 clinical <- data.frame(tcga_data@colData)
@@ -123,18 +118,17 @@ clinical <- data.frame(tcga_data@colData)
 # replace spaces with "_" in levels of definition column
 clinical$definition <-  gsub(" ", "_", clinical$definition)
 
-# making the definition column as factor
+# make the definition column a factor
 clinical$definition <- as.factor(clinical$definition)
-# relevling factor to ensure tumors would be compared to normal tissue.
+# relevel to ensure tumors are compared to normal tissue.
 levels(clinical$definition)
-#
 clinical$definition <- relevel(clinical$definition, ref = "Solid_Tissue_Normal")
 
-# Making DESeqDataSet object which stores all experiment data
+# Make DESeqDataSet object
 dds <- DESeqDataSetFromMatrix(countData = rna,
                               colData = clinical,
                               design = ~ definition)
-
+# Normalize data
 dds_norm <- vst(dds)
 ```
 
@@ -142,115 +136,139 @@ dds_norm <- vst(dds)
 <br>\
 Step 3 - Run WGCNA
 ```{r}
-# Take our normalzied RNA-Seq data from DESeq
-  normalized_counts <- assay(dds_norm) %>%
-    t() # Transpose this data
+# generates plots for a given gene module
+plot_module <- function(module_name) {
+  module_df <- module_eigengenes %>%
+    tibble::rownames_to_column("barcode") %>%
+  # Here we are performing an inner join with a subset of metadata
+  dplyr::inner_join(clinical %>%
+    dplyr::select(barcode, definition),
+    by = c("barcode" = "barcode")
+  )
   
-# Calculate adjacensy threshold parameter value
+  print(
+    ggplot(
+      module_df,
+      aes(
+        x = definition,
+        y = module_name,
+        color = definition
+      )
+    ) +
+    # a boxplot with outlier points hidden (they will be in the sina plot)
+    geom_boxplot(width = 0.2, outlier.shape = NA) +
+    # A sina plot to show all of the individual data points
+    ggforce::geom_sina(maxwidth = 0.3) +
+    theme_classic()
+  )
+  
+  # *** Now let's look at what genes are in the module ***
+  gene_module_key <- tibble::enframe(bwnet$colors, name = "gene", value = "module") %>%
+    # Let's add the `ME` part so its more clear what these numbers are and it matches elsewhere
+    dplyr::mutate(module = paste0("ME", module))
+  gene_module_key %>%
+    dplyr::filter(module == module_name)
+  
+  # *** For easy reading let's convert from ENSEMBLE to gene symbols ***
+  positive_module_genes_ensembl <- gene_module_key[gene_module_key$module == module_name,]
+  # convert to numeric to trim off the decimal place which represents the ensembl version
+  positive_module_genes_ensembl_numeric <- sub("\\..*", "", positive_module_genes_ensembl$gene)
+  # convert from ensembl to regular gene symbols and names
+  positive_module_genes <- select(org.Hs.eg.db, keys = positive_module_genes_ensembl_numeric, 
+                        keytype = 'ENSEMBL', columns = c('SYMBOL', "GENENAME"))
+  # remove NA's
+  positive_module_genes <- na.omit(positive_module_genes)
+  print(head(positive_module_genes))
+  
+  # save as string for sending to AI
+  positive_module_genes_string <- paste(positive_module_genes$SYMBOL, collapse=' ')
+}
+
+
+# Take normalized RNA-Seq data from DESeq
+normalized_counts <- assay(dds_norm) %>%
+  t() # Transpose this data
+
+# Calculate adjacency threshold parameter value
+if (!exists("sft") || is.null(sft) || !length(sft) || is_empty(sft)) {
   sft <- pickSoftThreshold(normalized_counts,
     dataIsExpr = TRUE,
     corFnc = cor,
     networkType = "signed"
   )
+}
   
-  # Calculate the signed R^2 (measure of model fit)
-  sft_df <- data.frame(sft$fitIndices) %>%
-    dplyr::mutate(model_fit = -sign(slope) * SFT.R.sq)
+# Calculate the signed R^2 (measure of model fit)
+sft_df <- data.frame(sft$fitIndices) %>%
+  dplyr::mutate(model_fit = -sign(slope) * SFT.R.sq)
   
-  # plot model fitting by the power soft threshold
-  ggplot(sft_df, aes(x = Power, y = model_fit, label = Power)) +
-  # Plot the points
-  geom_point() +
-  # We'll put the Power labels slightly above the data points
-  geom_text(nudge_y = 0.1) +
-  # We will plot what WGCNA recommends as an R^2 cutoff
-  geom_hline(yintercept = 0.80, col = "red") +
-  # Just in case our values are low, we want to make sure we can still see the 0.80 level
-  ylim(c(min(sft_df$model_fit), 1.05)) +
-  # We can add more sensible labels for our axis
-  xlab("Soft Threshold (power)") +
-  ylab("Scale Free Topology Model Fit, signed R^2") +
-  ggtitle("Scale independence") +
-  # This adds some nicer aesthetics to our plot
-  theme_classic()
+# plot model fitting by the power soft threshold
+ggplot(sft_df, aes(x = Power, y = model_fit, label = Power)) +
+# Plot the points
+geom_point() +
+# Put the Power labels  above the data points
+geom_text(nudge_y = 0.1) +
+# Plot what WGCNA recommends as an R^2 cutoff
+geom_hline(yintercept = 0.80, col = "red") +
+# Make sure we can still see low levels
+ylim(c(min(sft_df$model_fit), 1.05)) +
+# Adjust axis
+xlab("Soft Threshold (power)") +
+ylab("Scale Free Topology Model Fit, signed R^2") +
+ggtitle("Scale independence") +
+# Add some aesthetics
+theme_classic()
   
-  # *** the plot shows a positive inflection around a soft threshold power of 12 so we use that ***
+# *** the plot shows a positive inflection around a soft threshold power of 12 so we use that ***
 
-  # run WGCNA to find gene co-expression modules
-  
-  # use saved network if available
-  if (file.exists("2025_05_18_wgcna_results.RDS")) {
-      bwnet <- readRDS("2025_05_18_wgcna_results.RDS")
-  } else {
-      bwnet <- blockwiseModules(normalized_counts,
-        maxBlockSize = 5000, # What size chunks (how many genes) the calculations should be run in
-        TOMType = "signed", # topological overlap matrix
-        power = 12, # soft threshold for network construction
-        numericLabels = TRUE, # Let's use numbers instead of colors for module labels
-        randomSeed = 1234, # there's some randomness associated with this calculation so we should set a seed
-      )
-      # save result for loading later
-      write_rds(bwnet, "2025_05_18_wgcna_results.RDS")
-  }
-  
-  module_eigengenes <- bwnet$MEs
+# run WGCNA to find gene co-expression modules
 
-  # Print out a preview
-  head(module_eigengenes)
-  
-  # make sure samples are still in the same order
-  all.equal(clinical$barcode, rownames(module_eigengenes))
-  
-  # Create the design matrix from the definition variable (tumor vs normal)
-  des_mat <- model.matrix(~ clinical$definition)
-  
-  # Run linear model on each module. 
-  # Limma wants our tests to be per row, so we also need to transpose so the eigengenes are rows
-    # lmFit() needs a transposed version of the matrix
-    fit <- limma::lmFit(t(module_eigengenes), design = des_mat)
-    
-    # Apply empirical Bayes to smooth standard errors
-    fit <- limma::eBayes(fit)
-    
-  # Apply multiple testing correction and obtain stats in a data frame
-    stats_df <- limma::topTable(fit, number = ncol(module_eigengenes)) %>%
-      tibble::rownames_to_column("module")
-
-  # look at the most significant modules
-    head(stats_df)
-    
-  # *** The most significant module is ME6 so let's plot it***
-    module_6_df <- module_eigengenes %>%
-      tibble::rownames_to_column("barcode") %>%
-    # Here we are performing an inner join with a subset of metadata
-    dplyr::inner_join(clinical %>%
-      dplyr::select(barcode, definition),
-      by = c("barcode" = "barcode")
+# use saved network if available
+if (file.exists("2025_05_18_wgcna_results.RDS")) {
+    bwnet <- readRDS("2025_05_18_wgcna_results.RDS")
+} else {
+    bwnet <- blockwiseModules(normalized_counts,
+      maxBlockSize = 5000, # What size chunks (how many genes) the calculations should be run in
+      TOMType = "signed", # topological overlap matrix
+      power = 12, # soft threshold for network construction
+      numericLabels = TRUE, # Let's use numbers instead of colors for module labels
+      randomSeed = 1234, # there's some randomness associated with this calculation so we should set a seed
     )
+    # save result for loading later
+    readr::write_rds(bwnet, "2025_05_18_wgcna_results.RDS")
+}
+
+module_eigengenes <- bwnet$MEs
+head(module_eigengenes)
+
+# make sure samples are in same order
+all.equal(clinical$barcode, rownames(module_eigengenes))
+
+# Create the design matrix from the definition variable (tumor vs normal)
+des_mat <- model.matrix(~ clinical$definition)
+
+# Run linear model on each module. 
+# limma wants our tests to be per row and lmFit() needs a transposed version of matrix
+fit <- limma::lmFit(t(module_eigengenes), design = des_mat)
     
-  # *** the plot shows the module genes have elevated expression in normal tissue compared to tumor tissue ***
-  ggplot(
-    module_6_df,
-    aes(
-      x = definition,
-      y = ME6,
-      color = definition
-    )
-  ) +
-  # a boxplot with outlier points hidden (they will be in the sina plot)
-  geom_boxplot(width = 0.2, outlier.shape = NA) +
-  # A sina plot to show all of the individual data points
-  ggforce::geom_sina(maxwidth = 0.3) +
-  theme_classic()
-  
-  # *** Now let's look at what genes are in module 6 ***
-  gene_module_key <- tibble::enframe(bwnet$colors, name = "gene", value = "module") %>%
-    # Let's add the `ME` part so its more clear what these numbers are and it matches elsewhere
-    dplyr::mutate(module = paste0("ME", module))
-  gene_module_key %>%
-    dplyr::filter(module == "ME6")
+# Apply empirical Bayes to smooth standard errors
+fit <- limma::eBayes(fit)
+    
+# Apply multiple testing correction and obtain stats in a data frame
+stats_df <- limma::topTable(fit, number = ncol(module_eigengenes)) %>%
+  tibble::rownames_to_column("module")
+
+# look at the most significant modules
+head(stats_df)
+    
+# *** The two most significant modules with negative log fc are ME6 & M10 (more associated with normal tissue)***
+plot_module("ME6")
+plot_module("ME10")
+
+# *** The two most significant modules with positive log fc are ME7 & M54 (more associated with tumors)***
+plot_module("ME7")
+plot_module("ME54")
 ```
-
 <br>\
 <br>\
 Step 4 and beyond - 
@@ -260,6 +278,9 @@ Step 4 and beyond -
          d) add timer code and speed enhancements (saving results to hd, multi-threading, AI?, cloud?, doParallel?)
          e) AI enhancements (Posit?, ask AI to speed up my code?)
          f) look at correlation strength (topological overlap matrix - TOMs)
+         g) library(doParallel) registerDoParallel(cores=4)
          g) other TODOs
 ```{r}
+  # Save the workspace for future loading
+  save.image(file = "bladder_wgcna_workspace.RData")
 ```
