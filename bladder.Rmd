@@ -12,10 +12,11 @@ acankaya2017@fau.edu
 Based on tutorials found at 
 https://www.costalab.org/wp-content/uploads/2020/11/R_class_D3.htm
 https://alexslemonade.github.io/refinebio-examples/04-advanced-topics/network-analysis_rnaseq_01_wgcna.html
-https://github.com/hamidghaedi/RNA-seq-differential-expression
+https://github.com/hamidghaedi/RNA-seq-differential-expression 
+https://github.com/shehbeel/pbta-analysis/blob/main/wgcna-mirna-alsf.R 
 <br>\
 <br>\
-Step 1 - Install & load packages, download data from TCGA, and prepare it for EdgeR
+Step 1 - Install & load packages, download data from TCGA, and prepare it for DEG analysis
 ```{r}
 r = getOption("repos")
 r["CRAN"] = "http://cran.us.r-project.org"
@@ -25,11 +26,13 @@ if (!require("BiocManager", quietly = TRUE))
   install.packages("BiocManager")
 
 BiocManager::install("TCGAbiolinks")
-BiocManager::install("GO.db")
-BiocManager::install("preprocessCore")
+# BiocManager::install("GO.db")
+# BiocManager::install("preprocessCore")
 BiocManager::install("WGCNA")
 BiocManager::install("DESeq2")
 BiocManager::install("org.Hs.eg.db")
+BiocManager::install("clusterProfiler")
+BiocManager::install("DOSE")
 
 # knit to PDF
 # install.packages("tinytex")
@@ -37,6 +40,7 @@ BiocManager::install("org.Hs.eg.db")
 
 install.packages("ggforce")
 install.packages('VennDiagram')
+install.packages("enrichplot")
 
 library("TCGAbiolinks")
 library("limma")
@@ -50,11 +54,10 @@ library("doParallel")
 library("org.Hs.eg.db")
 library("AnnotationDbi")
 library("edgeR")
-library("glmnet")
-library("factoextra")
-library("FactoMineR")
+# library("glmnet")
+# library("factoextra")
+# library("FactoMineR")
 library("caret")
-library("SummarizedExperiment")
 library("gplots")
 library("survival")
 library("survminer")
@@ -62,12 +65,23 @@ library("RColorBrewer")
 library("gProfileR")
 library("genefilter")
 library("VennDiagram")
+library("clusterProfiler")
+library("DOSE")
+
+options(stringsAsFactors = FALSE); # speeds up WGCNA calculations
+
+# my computer has 16 cores and 22 total threads using Hyper-Threading
+# it is recommended by WGNCA to use a number of threads equal to or less than 
+#  the number of physical cores
+enableWGCNAThreads(2)
 
 setwd('C:/Adam/R/')  # make sure it already exists
 
 if (file.exists("bladder_workspace.RData")) {
   load("bladder_workspace.RData") # load the saved workspace
 }
+
+ptm <- proc.time()  # start the timer
 
 # Before we perform a GDC query let's look at the TCGA-BLCA data
 # As of June 2025 we should see a case count of 412
@@ -85,7 +99,6 @@ TCGAbiolinks:::getProjectSummary("TCGA-BLCA")
 # The results are a table with 431 rows (because some patients have multiple cases each)
 # There are 29 columns with meta data about each case such as sample_type (tumor vs normal)
 # Only run the query if we don't have results already saved
-# TODO use GDCdownload and GDCprepare to save data to local file
 if (!exists("lihc_res") || is.null(lihc_res) || !length(lihc_res) || is_empty(lihc_res)) {
   query_TCGA = GDCquery(
     project = "TCGA-BLCA",
@@ -125,6 +138,8 @@ first6genes = head(assay(tcga_data)[,1:3])
 rownames(first6genes) = rownames
 colnames(first6genes) = c("Case 1", "Case 2", "Case 3")
 first6genes
+
+chunk1_time = (proc.time() - ptm)[3] # stop the timer
 ```
 
 <br>\
@@ -141,7 +156,7 @@ Step 2 - Generate DGEList, filter low counts, and normalize data
 # The pipeline will return a list of three objects:
 #   voom - the TMM normalized data returned by running voom
 #   eBayes - the fitted model returned by running eBayes
-#   topTable - a simple table which contains the top 1000 differentially expressed genes 
+#   topTable - a simple table which contains the top 5000 differentially expressed genes 
 #    sorted by p.value
 # *******************************************************************************
 limma_pipeline = function(
@@ -173,13 +188,11 @@ limma_pipeline = function(
                    genes=as.data.frame(rowData(tcga_data)))
   
     # filtering - by default genes with less than 10 counts per million reads are removed
-    # after filtering we have 28087 genes remaining
-    # no need to filter further by logfc or adjusted p-value because all
-    #  entries already meet the cutoff criteria
     keep = filterByExpr(dge,design) # genes which meet are left after filtering
     dge = dge[keep,,keep.lib.sizes=FALSE] # filter the DGEList object, only keep the genes we want
     rm(keep) # remove this object from memory because we are done with it
     
+    # TODO do need to filter further by logfc and adjusted p-value?
     # TODO do we need rpkm() filtering?
   
     # Normalization (TMM followed by voom)
@@ -196,16 +209,18 @@ limma_pipeline = function(
     fit = eBayes(fit)
     
     # Save top genes
-    topGenes = topTable(fit, coef=ncol(design), number=1000, sort.by="p")
+    topGenes = topTable(fit, coef=ncol(design), number=5000, sort.by="p")
   
     return(
       list(
         voomObj=v, # normalized data
         fit=fit, # fitted model and statistics
-        topGenes=topGenes # the 1000 most differentially expressed genes
+        topGenes=topGenes # the 5000 most differentially expressed genes
       )
     )
 }
+
+ptm <- proc.time()  # start the timer
 
 # Run the pipeline on the tcga_data from step 1 and normal tissue as the reference
 #  "definition" is the column name for the tissue type (tumor vs normal)
@@ -227,6 +242,8 @@ clinical$definition <- as.factor(clinical$definition)
 # relevel to ensure tumors are compared to normal tissue.
 levels(clinical$definition)
 clinical$definition <- relevel(clinical$definition, ref = "Solid_Tissue_Normal")
+
+chunk2_time = (proc.time() - ptm)[3] # stop the timer
 ```
 
 <br>\
@@ -259,8 +276,8 @@ TCGAVisualize_volcano(
   x,
   y,
   xlab = "logFC",
-  title = "Volcano plot of top 1000 genes",
-  filename = "volcano_top1000.pdf"
+  title = "Volcano plot of top 5000 genes",
+  filename = "volcano_top5000.pdf"
 )
 
 # *** create a heatmap (hierarchical clustering) ***
@@ -289,6 +306,8 @@ gene_heatmap = heatmap.2(
   cexRow=.6,            # Resize row labels
   margins=c(1,5)        # Define margin spaces
 )
+
+chunk3_time = (proc.time() - ptm)[3] # stop the timer
 ```
 
 <br>\
@@ -331,7 +350,7 @@ get_module_genes <- function(module_name) {
   # convert to numeric to trim off the decimal place which represents the ensembl version
   module_genes_ensembl_numeric <- sub("\\..*", "", module_genes_ensembl$gene)
   # convert from ensembl to regular gene symbols and names
-  module_genes <- select(org.Hs.eg.db, keys = module_genes_ensembl_numeric, 
+  module_genes <- AnnotationDbi::select(org.Hs.eg.db, keys = module_genes_ensembl_numeric, 
                         keytype = 'ENSEMBL', columns = c('SYMBOL', "GENENAME"))
   # remove NA's
   module_genes <- na.omit(module_genes)
@@ -342,6 +361,8 @@ get_module_genes <- function(module_name) {
   
   return(module_genes_string)
 }
+
+ptm <- proc.time()  # start the timer
 
 # Calculate adjacency threshold parameter value using the normalized data from limma
 if (!exists("sft") || is.null(sft) || !length(sft) || is_empty(sft)) {
@@ -378,8 +399,8 @@ theme_classic()
 # run WGCNA to find gene co-expression modules
 
 # use saved network if available
-if (file.exists("2025_05_22_wgcna_results.RDS")) {
-    bwnet <- readRDS("2025_05_22_wgcna_results.RDS")
+if (file.exists("2025_06_05_wgcna_results.RDS")) {
+    bwnet <- readRDS("2025_06_05_wgcna_results.RDS")
 } else {
     bwnet <- blockwiseModules(d_mat,
       maxBlockSize = 25000, # What size chunks (how many genes) the calculations should be run in
@@ -389,7 +410,7 @@ if (file.exists("2025_05_22_wgcna_results.RDS")) {
       randomSeed = 1234, # there's some randomness associated with this calculation so we should set a seed
     )
     # save result for loading later
-    readr::write_rds(bwnet, "2025_05_22_wgcna_results.RDS")
+    readr::write_rds(bwnet, "2025_06_05_wgcna_results.RDS")
 }
 
 module_eigengenes <- bwnet$MEs
@@ -424,45 +445,42 @@ dplyr::inner_join(clinical %>%
   by = c("barcode" = "barcode")
 )
 
-# *** The most significant module with positive log fc is ME3 (more associated with tumors)***
+# *** The most significant modules with positive log fc are ME3 and ME23 
+#     (more associated with tumors )***
 ME3_genes <- get_module_genes("ME3")
 plot_module("ME3")
 
-# *** The most significant module with negative log fc is ME5 (more associated with normal tissue)***
+# *** The most significant module with negative log fc are ME5 and ME7 
+# (more associated with normal tissue) ***
 ME5_genes <- get_module_genes("ME5")
 plot_module("ME5")
 
 # Calculate the adjacency matrix
-# adj_mat <- adjacency(d_mat, power=12, corFnc="bicor", type="signed",  corOptions = "use = 'p'")
+#adj_mat <- adjacency(d_mat, power=12, corFnc="bicor", type="signed",  corOptions = "use = 'p'")
 
 # Calculate the topological overlap matrix (TOM)
 # TOM <- TOMsimilarityFromExpr(d_mat, power = 12)
+
+chunk4_time = (proc.time() - ptm)[3] # stop the timer
 ```
 
 <br>\
 <br>\
 Step 5 - Generate venn diagrams and other visuals
 ```{r}
+ptm <- proc.time()  # start the timer
+
 module_genes <- tibble::enframe(bwnet$colors, name = "gene", value = "module") %>%
   dplyr::mutate(module = paste0("ME", module))
 
 # *** Show venn diagram overlap between module genes and DEGs (positive log fc) ***
-
-# TODO make this work with a character map of all the module names
-# top_5_positive_modules <- head(arrange(stats_df, desc(logFC)), 5)
-# target <- strsplit(top_5_positive_modules$module, " ") %>% paste(collapse = "|")
-# the top five positive logfc modules are ME3, ME23, ME6, ME21, ME11
-# top_5_negative_modules <- head(arrange(stats_df, logFC), 5)
-# target <- strsplit(top_5_negative_modules$module, " ") %>% paste(collapse = "|")
-# the top five negative logfc modules are ME5, ME7, ME2, ME14, ME1
-
 positive_module_genes_ensembl <- module_genes %>%
-  dplyr::filter(module == "ME3" | module == "ME23" | module == "ME6"
-                | module == "ME21" | module == "ME11")
+  dplyr::filter(module == "ME3" | module == "ME23")
 # convert to numeric to trim off the decimal place which represents the ensembl version
 positive_module_genes_ensembl_numeric <- sub("\\..*", "", positive_module_genes_ensembl$gene)
 # convert from ensembl to regular gene symbols and names
-positive_module_genes_ensembl <- select(org.Hs.eg.db, keys = positive_module_genes_ensembl_numeric, 
+positive_module_genes_ensembl <- AnnotationDbi::select(org.Hs.eg.db, keys =       
+                      positive_module_genes_ensembl_numeric, 
                       keytype = 'ENSEMBL', columns = c('SYMBOL', "GENENAME"))
 # remove NA's
 positive_module_genes_ensembl <- na.omit(positive_module_genes_ensembl)
@@ -472,7 +490,7 @@ positive_degs <- na.omit(limma_res$topGenes[limma_res$topGenes$logFC > 0,]$gene_
 venn.diagram(
   main = "Positive logFC (high exp in tumor tissue) - Module genes vs DEGs",
   x = list(positive_degs, positive_module_genes_ensembl$SYMBOL),
-  category.names = c("DEGs", "Module genes (ME3,ME23,ME6,ME21,ME11)"),
+  category.names = c("DEGs", "Module genes (ME3,ME23)"),
   cat.pos = c(225,180),
   filename = 'Positive_LogFC-Module_genes_vs_DEGs.png',
   output=TRUE,
@@ -480,16 +498,16 @@ venn.diagram(
   fil=c("darkorchid2", "cadetblue1")
 )
 
-# *** Show overlap between module genes and DEGs (negative log fc) ***
+# *** Show venn diagram overlap between module genes and DEGs (negative log fc) ***
 module_genes <- tibble::enframe(bwnet$colors, name = "gene", value = "module") %>%
   dplyr::mutate(module = paste0("ME", module))
 negative_module_genes_ensembl <- module_genes %>%
-  dplyr::filter(module == "ME5" | module == "ME7" | module == "ME2"
-                | module == "ME14" | module == "ME1")
+  dplyr::filter(module == "ME5" | module == "ME7")
 # convert to numeric to trim off the decimal place which represents the ensembl version
 negative_module_genes_ensembl_numeric <- sub("\\..*", "", negative_module_genes_ensembl$gene)
 # convert from ensembl to regular gene symbols and names
-negative_module_genes_ensembl <- select(org.Hs.eg.db, keys = negative_module_genes_ensembl_numeric, 
+negative_module_genes_ensembl <- AnnotationDbi::select(org.Hs.eg.db, keys = 
+                      negative_module_genes_ensembl_numeric, 
                       keytype = 'ENSEMBL', columns = c('SYMBOL', "GENENAME"))
 # remove NA's
 negative_module_genes_ensembl <- na.omit(negative_module_genes_ensembl)
@@ -499,7 +517,7 @@ negative_degs <- na.omit(limma_res$topGenes[limma_res$topGenes$logFC < 0,]$gene_
 venn.diagram(
   main = "Negative logFC (high exp in normal tissue) - Module genes vs DEGs",
   x = list(negative_module_genes_ensembl$SYMBOL, negative_degs),
-  category.names = c("Module genes (ME5,ME7,ME2,ME14,ME1)" , "DEGs"),
+  category.names = c("Module genes (ME5,ME7)" , "DEGs"),
   cat.pos = c(0,45),
   filename = 'Negative_LogFC-Module_genes_vs_DEGs.png',
   output=TRUE,
@@ -507,21 +525,86 @@ venn.diagram(
   fil=c("darkorchid2", "cadetblue1")
 )
 
-# *** Create gene clustering tree (dendrogram) of TCGA modules ***
+# *** Find the overlapping genes between DEGs and modules ***
+positive_overlap_genes <- intersect(positive_module_genes_ensembl$SYMBOL, positive_degs)
+negative_overlap_genes <- intersect(negative_module_genes_ensembl$SYMBOL, negative_degs)
 
+# *** TODO Create gene clustering tree (dendrogram) of TCGA modules ***
+
+chunk5_time = (proc.time() - ptm)[3] # stop the timer
 ```
 
 <br>\
 <br>\
-Step 6 -
-   a) experiment with parameters such as blocksize, soft threshold, more filtering...look at original paper's values
-   b) examine all significant modules
-   c) add timer code and speed enhancements (saving results to hd, multi-threading, AI?, cloud?, doParallel?)
-   d) AI enhancements (Posit?, ask AI to speed up my code?)
-   e) library(doParallel) registerDoParallel(cores=4)
-   f) allowWGCNAThreads(8) 
-   g) other TODOs
+Step 6 - GO Gene set enrichment analysis (GSEA)
 ```{r}
-  # Save the workspace for future loading
-  save.image(file = "bladder_workspace.RData")
+ptm <- proc.time()  # start the timer
+
+# create the geneList as required by clusterProfiler
+# save the gene name to first column and the logFC to second column and sort by logFC
+
+# TODO look at various minGSSize and maxGSSize
+
+positive_overlap_genes_names <- c(positive_overlap_genes)
+positive_overlap_genes_logFC <- 
+  limma_res$topGenes[limma_res$topGenes$gene_name %in% positive_overlap_genes_names, ]$logFC
+positive_overlap_genes_logFC <- sort(positive_overlap_genes_logFC, decreasing = TRUE)
+positive_overlap_genes_list <- setNames(positive_overlap_genes_logFC, positive_overlap_genes_names)
+
+go_limma_up <- gseGO(geneList  = positive_overlap_genes_list,
+                  OrgDb        = org.Hs.eg.db,
+                  ont          = "ALL",
+                  minGSSize    = 2,
+                  maxGSSize    = 500,
+                  pvalueCutoff = 0.1, # set to 1 to get all results
+                  verbose      = TRUE,
+                  keyType      = "SYMBOL",
+                  scoreType    = "pos"
+                  )
+View(go_limma_up@result)
+
+negative_overlap_genes_names <- c(negative_overlap_genes)
+negative_overlap_genes_logFC <- 
+  limma_res$topGenes[limma_res$topGenes$gene_name %in% negative_overlap_genes_names, ]$logFC
+negative_overlap_genes_logFC <- sort(negative_overlap_genes_logFC, decreasing = TRUE)
+negative_overlap_genes_list <- setNames(negative_overlap_genes_logFC, negative_overlap_genes_names)
+
+go_limma_down <- gseGO(geneList  = negative_overlap_genes_list,
+                  OrgDb        = org.Hs.eg.db,
+                  ont          = "ALL",
+                  minGSSize    = 2,
+                  maxGSSize    = 500,
+                  pvalueCutoff = 0.1,
+                  verbose      = TRUE,
+                  keyType      = "SYMBOL",
+                  scoreType    = "pos"
+                  )
+View(go_limma_down@result)
+
+dotplot(go_limma_up, showCategory=10, split=".sign") + facet_grid(.~.sign)
+dotplot(go_limma_down, showCategory=10, split=".sign") + facet_grid(.~.sign)
+
+# Save the workspace for future loading
+#save.image(file = "bladder_workspace.RData")
+
+chunk6_time = (proc.time() - ptm)[3] # stop the timer
 ```
+
+Print out the timer values
+```{r}
+cat(paste0(
+  "Chunk 1 (download/load TCGA data) finished in ", format(round(chunk1_time, 1), nsmall = 0), "s\n",
+  "Chunk 2 (DGE, data normalization) finished in ", format(round(chunk2_time, 1), nsmall = 0), "s\n",
+  "Chunk 3 (Visualization) finished in ", format(round(chunk3_time, 1), nsmall = 0), "s\n",
+  "Chunk 4 (WGCNA) finished in ", format(round(chunk4_time, 1), nsmall = 0), "s\n",
+  "Chunk 5 (Venn diagram and other visuals) finished in ", format(round(chunk5_time, 1), nsmall = 0), "s\n",
+  "Chunk 6 (GSEA) finished in ", format(round(chunk6_time, 1), nsmall = 0), "s\n",
+  "Total run time: ", format(round(chunk1_time+chunk2_time+
+    chunk3_time+chunk4_time+chunk5_time+chunk6_time, 1), nsmall = 0), "s"))
+```
+
+Todos:
+   a) experiment with parameters such as blocksize, soft threshold, more filtering...look at original paper's        values
+   b) examine all significant modules
+   c) AI enhancements (Posit?, ask AI to speed up my code?)
+   d) write paper
