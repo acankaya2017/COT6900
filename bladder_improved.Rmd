@@ -10,14 +10,14 @@ Adam Cankaya
 acankaya2017@fau.edu
 <br>\
 Based on tutorials found at 
-https://www.costalab.org/wp-content/uploads/2020/11/R_class_D3.htm
-https://alexslemonade.github.io/refinebio-examples/04-advanced-topics/network-analysis_rnaseq_01_wgcna.html
-https://github.com/hamidghaedi/RNA-seq-differential-expression 
-https://github.com/shehbeel/pbta-analysis/blob/main/wgcna-mirna-alsf.R 
+https://www.costalab.org/wp-content/uploads/2020/11/R_class_D3.htm  
+https://alexslemonade.github.io/refinebio-examples/04-advanced-topics/network-analysis_rnaseq_01_wgcna.html  
+https://github.com/hamidghaedi/RNA-seq-differential-expression  
+https://github.com/shehbeel/pbta-analysis/blob/main/wgcna-mirna-alsf.R  
 <br>\
 <br>\
 Step 1 - Install & load packages, download data from TCGA, and prepare it for DEG analysis
-```{r}
+```{r, message = FALSE, warning = FALSE}
 if (!require("BiocManager", quietly = TRUE)) {
   install.packages("BiocManager")
   BiocManager::install("TCGAbiolinks")
@@ -96,6 +96,26 @@ TCGAbiolinks:::getProjectSummary("TCGA-BLCA")
 # The results are a table with 431 rows (because some patients have multiple cases each)
 # There are 29 columns with meta data about each case such as sample_type (tumor vs normal)
 # Only run the query if we don't have results already saved
+<<<<<<< HEAD
+if (!exists("tcga_data") || is.null(tcga_data) || !length(tcga_data) || is_empty(tcga_data)) {
+  #+ message = FALSE, warning = FALSE
+    query_TCGA = GDCquery(
+      project = "TCGA-BLCA",
+      data.category = "Transcriptome Profiling",
+      data.type="Gene Expression Quantification",
+      experimental.strategy = "RNA-Seq",
+      workflow.type = "STAR - Counts",
+      sample.type = c("Primary Tumor", "Solid Tissue Normal"))
+  
+    blca_res = getResults(query_TCGA)
+    
+    # Go ahead and download all the data from GDC to our working directory
+    GDCdownload(query = query_TCGA)
+    
+    # Now load the RNA-Seq data from the files into R workspace which we will save to file later
+    tcga_data = GDCprepare(query_TCGA)
+  #+
+=======
 if (!exists("blca_res") || is.null(blca_res) || !length(blca_res) || is_empty(blca_res)) {
   query_TCGA = GDCquery(
     project = "TCGA-BLCA",
@@ -106,15 +126,10 @@ if (!exists("blca_res") || is.null(blca_res) || !length(blca_res) || is_empty(bl
     sample.type = c("Primary Tumor", "Solid Tissue Normal"))
 
   blca_res = getResults(query_TCGA)
+>>>>>>> parent of 6ccd4d4 (Speed improvements suggested by ChatGPT)
   
   # We can create a summary table shows there are 412 tumor and 19 normal (412+19=431)
   summary(factor(blca_res$sample_type))
-  
-  # Go ahead and download all the data from GDC to our working directory
-  GDCdownload(query = query_TCGA)
-  
-  # Now load the RNA-Seq data from the files into R workspace which we will save to file later
-  tcga_data = GDCprepare(query_TCGA)
 }
 
 # This data object has 60660 rows and 431 columns
@@ -142,7 +157,7 @@ chunk1_time = (proc.time() - ptm)[3] # stop the timer
 <br>\
 <br>\
 Step 2 - Generate DGEList, filter low counts, and normalize data
-```{r}
+```{r, message = FALSE, warning = FALSE}
 # *******************************************************************************
 # Before we can perform DEG analysis we need to normalize the data
 # Let's create a limma pipeline to do this...
@@ -246,7 +261,7 @@ chunk2_time = (proc.time() - ptm)[3] # stop the timer
 <br>\
 <br>\
 Step 3 - Visualize DEGs with a scatter plot, a heatmap, and a volcano plot
-```{r}
+```{r, message = FALSE, warning = FALSE}
 # *****************************************************************************
 # generate a scatter plot to show a separation of tumor vs normal points
 # *****************************************************************************
@@ -331,7 +346,7 @@ chunk3_time = (proc.time() - ptm)[3] # stop the timer
 <br>\
 <br>\
 Step 4 - Run WGCNA to find gene modules
-```{r}
+```{r, message = FALSE, warning = FALSE}
 # ******************************************************
 # prints a plot for a given gene module_name
 # ******************************************************
@@ -412,23 +427,40 @@ ggtitle("Scale independence") +
 # Add some aesthetics
 theme_classic()
   
+<<<<<<< HEAD
+# *** the plot shows a peak positive inflection around a soft threshold power of 13 so we use that ***
+=======
 # *** the plot shows a peak positive inflection around a soft threshold power of 12 so we use that ***
+>>>>>>> parent of 6ccd4d4 (Speed improvements suggested by ChatGPT)
 
 # run WGCNA to find gene co-expression modules
 
 # use saved network if available
+<<<<<<< HEAD
+if (file.exists("2025_06_16_wgcna_results.RDS")) {
+    bwnet <- readRDS("2025_06_15_wgcna_results.RDS")
+=======
 if (file.exists("2025_06_06_wgcna_results.RDS")) {
     bwnet <- readRDS("2025_06_06_wgcna_results.RDS")
+>>>>>>> parent of 6ccd4d4 (Speed improvements suggested by ChatGPT)
 } else {
     bwnet <- blockwiseModules(d_mat,
       maxBlockSize = 25000, # What size chunks (how many genes) the calculations should be run in
       TOMType = "signed", # topological overlap matrix
+<<<<<<< HEAD
+      power = 13, # soft threshold for network construction
+=======
       power = 12, # soft threshold for network construction
+>>>>>>> parent of 6ccd4d4 (Speed improvements suggested by ChatGPT)
       numericLabels = TRUE, # Let's use numbers instead of colors for module labels
       randomSeed = 1234, # there's some randomness associated with this calculation so we should set a seed
     )
     # save result for loading later
+<<<<<<< HEAD
+    write_rds(bwnet, "2025_06_16_wgcna_results.RDS")
+=======
     write_rds(bwnet, "2025_06_06_wgcna_results.RDS")
+>>>>>>> parent of 6ccd4d4 (Speed improvements suggested by ChatGPT)
 }
 
 module_eigengenes <- bwnet$MEs
@@ -463,15 +495,15 @@ dplyr::inner_join(clinical %>%
   by = c("barcode" = "barcode")
 )
 
-# *** The most significant modules with positive log fc are ME3 and ME23 
+# *** The most significant modules with positive log fc are ME4 and ME31
 #     (more associated with tumors )***
-ME3_genes <- get_module_genes("ME3")
-plot_module("ME3")
+ME3_genes <- get_module_genes("ME4")
+plot_module("ME4")
 
-# *** The most significant module with negative log fc are ME5 and ME7 
+# *** The most significant module with negative log fc are ME2 and ME7 
 # (more associated with normal tissue) ***
-ME5_genes <- get_module_genes("ME5")
-plot_module("ME5")
+ME5_genes <- get_module_genes("ME2")
+plot_module("ME2")
 
 # Calculate the adjacency matrix
 #adj_mat <- adjacency(d_mat, power=12, corFnc="bicor", type="signed",  corOptions = "use = 'p'")
@@ -485,7 +517,7 @@ chunk4_time = (proc.time() - ptm)[3] # stop the timer
 <br>\
 <br>\
 Step 5 - Generate venn diagrams and other visuals
-```{r}
+```{r, message = FALSE, warning = FALSE}
 ptm <- proc.time()  # start the timer
 
 module_genes <- tibble::enframe(bwnet$colors, name = "gene", value = "module") %>%
@@ -493,13 +525,15 @@ module_genes <- tibble::enframe(bwnet$colors, name = "gene", value = "module") %
 
 # *** Show venn diagram overlap between module genes and DEGs (positive log fc) ***
 positive_module_genes_ensembl <- module_genes %>%
-  dplyr::filter(module == "ME3" | module == "ME23")
+  dplyr::filter(module == "ME4" | module == "ME31")
 # convert to numeric to trim off the decimal place which represents the ensembl version
 positive_module_genes_ensembl_numeric <- sub("\\..*", "", positive_module_genes_ensembl$gene)
 # convert from ensembl to regular gene symbols and names
+#+ message = FALSE, warning = FALSE
 positive_module_genes_ensembl <- AnnotationDbi::select(org.Hs.eg.db, keys =       
                       positive_module_genes_ensembl_numeric, 
                       keytype = 'ENSEMBL', columns = c('SYMBOL', "GENENAME"))
+#+
 # remove NA's
 positive_module_genes_ensembl <- na.omit(positive_module_genes_ensembl)
 
@@ -508,7 +542,7 @@ positive_degs <- na.omit(limma_res$topGenes[limma_res$topGenes$logFC > 0,]$gene_
 venn.diagram(
   main = "Positive logFC (high exp in tumor tissue) - Module genes vs DEGs",
   x = list(positive_degs, positive_module_genes_ensembl$SYMBOL),
-  category.names = c("DEGs", "Module genes (ME3,ME23)"),
+  category.names = c("DEGs", "Module genes (ME4,ME31)"),
   cat.pos = c(225,180),
   filename = 'Positive_LogFC-Module_genes_vs_DEGs.png',
   output=TRUE,
@@ -521,13 +555,15 @@ venn.diagram(
 module_genes <- tibble::enframe(bwnet$colors, name = "gene", value = "module") %>%
   dplyr::mutate(module = paste0("ME", module))
 negative_module_genes_ensembl <- module_genes %>%
-  dplyr::filter(module == "ME5" | module == "ME7")
+  dplyr::filter(module == "ME2" | module == "ME7")
 # convert to numeric to trim off the decimal place which represents the ensembl version
 negative_module_genes_ensembl_numeric <- sub("\\..*", "", negative_module_genes_ensembl$gene)
 # convert from ensembl to regular gene symbols and names
+#+ message = FALSE, warning = FALSE
 negative_module_genes_ensembl <- AnnotationDbi::select(org.Hs.eg.db, keys = 
                       negative_module_genes_ensembl_numeric, 
                       keytype = 'ENSEMBL', columns = c('SYMBOL', "GENENAME"))
+#+
 # remove NA's
 negative_module_genes_ensembl <- na.omit(negative_module_genes_ensembl)
   
@@ -536,7 +572,7 @@ negative_degs <- na.omit(limma_res$topGenes[limma_res$topGenes$logFC < 0,]$gene_
 venn.diagram(
   main = "Negative logFC (high exp in normal tissue) - Module genes vs DEGs",
   x = list(negative_module_genes_ensembl$SYMBOL, negative_degs),
-  category.names = c("Module genes (ME5,ME7)" , "DEGs"),
+  category.names = c("Module genes (ME2,ME7)" , "DEGs"),
   cat.pos = c(0,45),
   filename = 'Negative_LogFC-Module_genes_vs_DEGs.png',
   output=TRUE,
@@ -557,7 +593,7 @@ chunk5_time = (proc.time() - ptm)[3] # stop the timer
 <br>\
 <br>\
 Step 6 - GO Gene set enrichment analysis (GSEA)
-```{r}
+```{r, message = FALSE, warning = FALSE}
 ptm <- proc.time()  # start the timer
 
 # create the geneList as required by clusterProfiler
@@ -581,8 +617,15 @@ go_limma_up <- gseGO(geneList  = positive_overlap_genes_list,
                   keyType      = "SYMBOL",
                   scoreType    = "pos"
                   )
+<<<<<<< HEAD
+if(exists("go_limma_up@result") & !is.null(go_limma_up@result)) {
+  View(go_limma_up@result)
+  dotplot(go_limma_up, showCategory=10, split=".sign") + facet_grid(.~.sign)
+}
+=======
 #View(go_limma_up@result)
 View(getResult(go_limma_up))
+>>>>>>> parent of 6ccd4d4 (Speed improvements suggested by ChatGPT)
 
 negative_overlap_genes_names <- c(negative_overlap_genes)
 negative_overlap_genes_logFC <- 
@@ -600,11 +643,18 @@ go_limma_down <- gseGO(geneList  = negative_overlap_genes_list,
                   keyType      = "SYMBOL",
                   scoreType    = "pos"
                   )
+<<<<<<< HEAD
+if(exists("go_limma_down@result") & !is.null(go_limma_down@result) & length(go_limma_down@result)) {
+  View(go_limma_down@result)
+  dotplot(go_limma_down, showCategory=10, split=".sign") + facet_grid(.~.sign)
+}
+=======
 #View(go_limma_down@result)
 View(getResult(go_limma_down))
 
 dotplot(go_limma_up, showCategory=10, split=".sign") + facet_grid(.~.sign)
 dotplot(go_limma_down, showCategory=10, split=".sign") + facet_grid(.~.sign)
+>>>>>>> parent of 6ccd4d4 (Speed improvements suggested by ChatGPT)
 
 # Save the workspace for future loading
 save.image(file = "bladder_workspace.RData")
@@ -626,7 +676,13 @@ cat(paste0(
 ```
 
 Todos:
+<<<<<<< HEAD
+   * Replace WGNCA and GSEA steps with AI tools  
+   * other TODOs  
+   * write paper  
+=======
    a) more filtering by p value or logfc before wgnca?
    b) AI enhancements (Posit?, ask AI to speed up my code?)
    c) other TODOs
    d) write paper
+>>>>>>> parent of 6ccd4d4 (Speed improvements suggested by ChatGPT)
